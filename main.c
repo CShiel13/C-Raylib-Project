@@ -19,25 +19,38 @@
 #define CITY_HEIGHT 700
 #define QUEUE_VISIBLE 8
 
+typedef enum {
+    OVERLAY_NONE = 0,
+    OVERLAY_REPORTS,
+    OVERLAY_SETTINGS
+} UIOverlay;
+
 
 static const Rectangle queuePanel = {18, 104, 270, 700};
 static const Rectangle mapPanel = {300, 104, 930, 700};
 static const Rectangle detailsPanel = {1242, 104, 340, 700};
 static const Rectangle mapClip = {310, 150, 910, 642};
 static const float queueRowsY = 158.0f;
-static const float queueRowHeight = 77.0f;
+static const float queueRowHeight = 61.0f;
 
-static Rectangle compareButton = {460, 830, 90, 44};
-static Rectangle pauseButton = {558, 830, 90, 44};
-static Rectangle slowButton = {656, 830, 90, 44};
-static Rectangle normalButton = {754, 830, 90, 44};
-static Rectangle fastButton = {852, 830, 90, 44};
-static Rectangle stepButton = {950, 830, 90, 44};
-static Rectangle trafficButton = {1048, 830, 95, 44};
-static Rectangle simulateButton = {1151, 830, 115, 44};
-static Rectangle resetButton = {1470, 830, 100, 44};
-static const Rectangle dispatchModeButton = {1434, 112, 132, 30};
+static const Rectangle compareButton = {332, 830, 76, 44};
+static const Rectangle pauseButton = {416, 830, 72, 44};
+static const Rectangle slowButton = {496, 830, 72, 44};
+static const Rectangle normalButton = {576, 830, 64, 44};
+static const Rectangle fastButton = {648, 830, 72, 44};
+static const Rectangle stepButton = {728, 830, 70, 44};
+static const Rectangle dispatchButton = {806, 830, 84, 44};
+static const Rectangle trafficButton = {898, 830, 96, 44};
+static const Rectangle dispatchModeButton = {1002, 830, 92, 44};
+static const Rectangle simulateButton = {1102, 830, 104, 44};
+static const Rectangle reportsButton = {1214, 830, 86, 44};
+static const Rectangle settingsButton = {1308, 830, 86, 44};
+static const Rectangle resetButton = {1482, 830, 88, 44};
 static const Rectangle dispatchSelectedButton = {1260, 440, 306, 30};
+static const Rectangle modalPanel = {470, 210, 660, 490};
+static const Rectangle modalCloseButton = {1000, 638, 100, 38};
+static const Rectangle routesToggleButton = {550, 340, 500, 48};
+static const Rectangle civilianToggleButton = {550, 405, 500, 48};
 
 // Draw recognizable vector symbols without depending on platform emoji fonts.
 static void DrawIncidentIcon(IncidentType type, Vector2 center, float size, Color color)
@@ -146,92 +159,153 @@ static void DrawCivilianCar(const CivilianCar *car)
 
 
 
-static void DrawCity(void)
-
+static void DrawCityBuilding(Rectangle rect, int style)
 {
+    const Color roofs[] = {
+        {56, 79, 92, 255}, {66, 87, 98, 255}, {50, 74, 87, 255},
+        {72, 86, 92, 255}, {58, 82, 88, 255}
+    };
+    Color roof = roofs[style % 5];
+    DrawRectangleRounded((Rectangle){rect.x + 3, rect.y + 4, rect.width, rect.height},
+                         0.04f, 4, (Color){17, 35, 44, 105});
+    DrawRectangleRounded(rect, 0.04f, 4, (Color){37, 58, 67, 255});
+    DrawRectangleRounded((Rectangle){rect.x + 4, rect.y + 4, rect.width - 8,
+                                     rect.height - 8}, 0.04f, 4, roof);
+    DrawRectangle((int)rect.x + 9, (int)rect.y + 9, (int)rect.width - 18, 2,
+                  (Color){112, 131, 136, 150});
 
-    DrawRectangle(0, 0, CITY_WIDTH, CITY_HEIGHT, (Color){27, 48, 60, 255});
+    // Use a small, regular rooftop pattern rather than scattered decoration.
+    if (rect.width > 66 && rect.height > 48) {
+        DrawRectangleRounded((Rectangle){rect.x + 13, rect.y + 18, 14, 9},
+                             0.12f, 3, (Color){36, 55, 63, 255});
+        DrawRectangleRounded((Rectangle){rect.x + 33, rect.y + 18, 14, 9},
+                             0.12f, 3, (Color){36, 55, 63, 255});
+        DrawRectangle((int)rect.x + 16, (int)rect.y + 20, 8, 2,
+                      (Color){122, 141, 146, 160});
+        DrawRectangle((int)rect.x + 36, (int)rect.y + 20, 8, 2,
+                      (Color){122, 141, 146, 160});
+    } else {
+        DrawRectangleRounded((Rectangle){rect.x + 9, rect.y + 15, 12, 8},
+                             0.12f, 3, (Color){36, 55, 63, 255});
+    }
+}
 
+static void DrawCityTree(Vector2 p)
+{
+    DrawCircle((int)p.x + 2, (int)p.y + 3, 7, (Color){18, 38, 39, 180});
+    DrawCircle((int)p.x, (int)p.y, 7, (Color){50, 105, 78, 255});
+    DrawCircle((int)p.x - 2, (int)p.y - 2, 4, (Color){76, 133, 91, 255});
+    DrawCircleLines((int)p.x, (int)p.y, 7, (Color){101, 151, 103, 190});
+}
 
+static void DrawCrosswalkHorizontal(int x, int y)
+{
+    // Vertical bars across the east-west roadway, kept outside the junction box.
+    for (int stripe = 0; stripe < 5; stripe++)
+        DrawRectangle(x + stripe * 5, y, 3, 66, (Color){203, 212, 209, 175});
+}
 
-    // Simplified roads
+static void DrawCrosswalkVertical(int x, int y)
+{
+    // Horizontal bars across the north-south roadway, kept outside the junction box.
+    for (int stripe = 0; stripe < 5; stripe++)
+        DrawRectangle(x, y + stripe * 5, 66, 3, (Color){203, 212, 209, 175});
+}
 
-    DrawRectangle(0, 290, CITY_WIDTH, 72, (Color){75, 91, 103, 255});
+static void DrawCity(void)
+{
+    DrawRectangle(0, 0, CITY_WIDTH, CITY_HEIGHT, (Color){34, 53, 61, 255});
 
-    DrawRectangle(355, 80, 82, 550, (Color){75, 91, 103, 255});
+    // Subtle urban blocks and service alleys; the driveable emergency route
+    // network remains the existing three connected arterial roads below.
+    for (int x = 20; x < CITY_WIDTH; x += 64)
+        DrawLine(x, 0, x, CITY_HEIGHT, (Color){55, 73, 78, 35});
+    for (int y = 20; y < CITY_HEIGHT; y += 64)
+        DrawLine(0, y, CITY_WIDTH, y, (Color){55, 73, 78, 35});
 
-    DrawRectangle(730, 80, 82, 550, (Color){75, 91, 103, 255});
+    // Small green spaces, paths, and planted trees break up the built areas.
+    DrawRectangleRounded((Rectangle){45, 56, 100, 72}, 0.08f, 6, (Color){36, 79, 64, 255});
+    DrawLineEx((Vector2){54, 112}, (Vector2){129, 69}, 3, (Color){117, 133, 98, 255});
+    DrawCityTree((Vector2){68, 76}); DrawCityTree((Vector2){119, 108});
+    DrawCityTree((Vector2){92, 116}); DrawCityTree((Vector2){131, 78});
+    DrawRectangleRounded((Rectangle){500, 169, 130, 72}, 0.08f, 6, (Color){36, 79, 64, 255});
+    DrawLineEx((Vector2){509, 230}, (Vector2){618, 180}, 3, (Color){117, 133, 98, 255});
+    DrawCityTree((Vector2){520, 185}); DrawCityTree((Vector2){606, 222});
+    DrawCityTree((Vector2){573, 181}); DrawCityTree((Vector2){546, 225});
+    DrawRectangleRounded((Rectangle){850, 470, 125, 100}, 0.08f, 6, (Color){36, 79, 64, 255});
+    DrawLineEx((Vector2){862, 555}, (Vector2){958, 484}, 3, (Color){117, 133, 98, 255});
+    DrawCityTree((Vector2){870, 493}); DrawCityTree((Vector2){943, 550});
+    DrawCityTree((Vector2){916, 488}); DrawCityTree((Vector2){884, 548});
 
-
-
-    for (int x = 0; x < CITY_WIDTH; x += 55)
-
-        DrawRectangle(x, 324, 30, 4, (Color){188, 204, 211, 255});
-
-    for (int y = 90; y < 630; y += 55) {
-
-        DrawRectangle(394, y, 4, 30, (Color){188, 204, 211, 255});
-
-        DrawRectangle(769, y, 4, 30, (Color){188, 204, 211, 255});
-
+    // Parking courts and low-rise blocks in each neighborhood quadrant.
+    DrawRectangleRounded((Rectangle){160, 58, 155, 42}, 0.04f, 4, (Color){49, 64, 70, 255});
+    DrawRectangleRounded((Rectangle){463, 52, 222, 42}, 0.04f, 4, (Color){49, 64, 70, 255});
+    DrawRectangleRounded((Rectangle){851, 58, 183, 42}, 0.04f, 4, (Color){49, 64, 70, 255});
+    DrawRectangleRounded((Rectangle){55, 583, 230, 42}, 0.04f, 4, (Color){49, 64, 70, 255});
+    DrawRectangleRounded((Rectangle){465, 588, 225, 42}, 0.04f, 4, (Color){49, 64, 70, 255});
+    DrawRectangleRounded((Rectangle){844, 583, 190, 42}, 0.04f, 4, (Color){49, 64, 70, 255});
+    for (int i = 0; i < 7; i++) {
+        DrawLine(170 + i * 19, 62, 170 + i * 19, 96, (Color){129, 145, 145, 150});
+        DrawLine(65 + i * 28, 587, 65 + i * 28, 621, (Color){129, 145, 145, 150});
     }
 
+    const Rectangle buildings[] = {
+        {48,145,92,82}, {158,112,145,66}, {169,190,110,49},
+        {462,108,92,54}, {565,105,119,52}, {464,174,35,72}, {640,176,47,64},
+        {839,113,88,100}, {943,116,99,83}, {843,207,88,37},
+        {48,410,100,110}, {163,389,122,82}, {164,484,120,81},
+        {463,390,111,76}, {586,389,101,83}, {467,482,92,86}, {570,489,116,73},
+        {839,394,91,63}, {944,393,99,101}, {840,483,87,83}, {948,516,95,69}
+    };
+    const int buildingCount = (int)(sizeof(buildings) / sizeof(buildings[0]));
+    for (int i = 0; i < buildingCount; i++) DrawCityBuilding(buildings[i], i);
 
+    // Minor access roads and sidewalks sit beneath the connected main roads.
+    DrawRectangle(0, 274, CITY_WIDTH, 16, (Color){87, 102, 105, 255});
+    DrawRectangle(0, 362, CITY_WIDTH, 16, (Color){87, 102, 105, 255});
+    DrawRectangle(339, 80, 16, 550, (Color){87, 102, 105, 255});
+    DrawRectangle(437, 80, 16, 550, (Color){87, 102, 105, 255});
+    DrawRectangle(714, 80, 16, 550, (Color){87, 102, 105, 255});
+    DrawRectangle(812, 80, 16, 550, (Color){87, 102, 105, 255});
 
-    DrawRectangle(70, 105, 210, 130, (Color){40, 63, 77, 255});
+    // Main arterial geometry matches the road nodes and routing graph exactly.
+    DrawRectangle(0, 290, CITY_WIDTH, 72, (Color){68, 82, 91, 255});
+    DrawRectangle(355, 80, 82, 550, (Color){68, 82, 91, 255});
+    DrawRectangle(730, 80, 82, 550, (Color){68, 82, 91, 255});
+    DrawLine(0, 294, CITY_WIDTH, 294, (Color){139, 151, 153, 210});
+    DrawLine(0, 358, CITY_WIDTH, 358, (Color){139, 151, 153, 210});
+    DrawLine(359, 80, 359, 630, (Color){139, 151, 153, 210});
+    DrawLine(433, 80, 433, 630, (Color){139, 151, 153, 210});
+    DrawLine(734, 80, 734, 630, (Color){139, 151, 153, 210});
+    DrawLine(808, 80, 808, 630, (Color){139, 151, 153, 210});
 
-    DrawRectangle(490, 105, 175, 130, (Color){40, 63, 77, 255});
+    // Painted center lines distinguish opposing traffic directions.
+    for (int x = 0; x < CITY_WIDTH; x += 40) {
+        if ((x >= 320 && x <= 440) || (x >= 695 && x <= 815)) continue;
+        DrawRectangle(x, 324, 23, 3, (Color){222, 190, 111, 235});
+        DrawRectangle(x, 329, 23, 2, (Color){222, 190, 111, 150});
+    }
+    for (int y = 80; y < 630; y += 40) {
+        if (y >= 280 && y <= 360) continue;
+        DrawRectangle(394, y, 3, 23, (Color){222, 190, 111, 235});
+        DrawRectangle(399, y, 2, 23, (Color){222, 190, 111, 150});
+        DrawRectangle(769, y, 3, 23, (Color){222, 190, 111, 235});
+        DrawRectangle(774, y, 2, 23, (Color){222, 190, 111, 150});
+    }
 
-    DrawRectangle(865, 105, 175, 130, (Color){40, 63, 77, 255});
+    // Zebra crossings and stop bars clarify the two connected junctions.
+    DrawCrosswalkHorizontal(335, 293); DrawCrosswalkHorizontal(437, 293);
+    DrawCrosswalkHorizontal(710, 293); DrawCrosswalkHorizontal(812, 293);
+    DrawCrosswalkVertical(363, 262); DrawCrosswalkVertical(363, 363);
+    DrawCrosswalkVertical(738, 262); DrawCrosswalkVertical(738, 363);
 
-    DrawRectangle(70, 410, 210, 155, (Color){40, 63, 77, 255});
-
-    DrawRectangle(490, 410, 175, 155, (Color){40, 63, 77, 255});
-
-    DrawRectangle(865, 410, 175, 155, (Color){40, 63, 77, 255});
-
-
-
-    DrawText("BUILDING A", 112, 160, 18, (Color){186, 204, 213, 255});
-
-    DrawText("BUILDING B", 520, 160, 18, (Color){186, 204, 213, 255});
-
-    DrawText("BUILDING C", 900, 160, 18, (Color){186, 204, 213, 255});
-
-    DrawText("BUILDING D", 112, 465, 18, (Color){186, 204, 213, 255});
-
-    DrawText("BUILDING E", 520, 465, 18, (Color){186, 204, 213, 255});
-
-    DrawText("BUILDING F", 900, 465, 18, (Color){186, 204, 213, 255});
-
-
-
-    // Initial station positions for all nine response units.
-
-    DrawCircle(300, 270, 8, RED);
-
-    DrawCircle(330, 270, 8, RED);
-
-    DrawCircle(315, 245, 8, RED);
-
-    DrawText("FIRE x3", 287, 218, 14, MAROON);
-
-    DrawCircle(650, 380, 8, BLUE);
-
-    DrawCircle(680, 380, 8, BLUE);
-
-    DrawText("POLICE x2", 630, 350, 14, DARKBLUE);
-
-    DrawCircle(770, 270, 8, DARKGREEN);
-
-    DrawCircle(800, 270, 8, DARKGREEN);
-
-    DrawCircle(770, 300, 8, DARKGREEN);
-
-    DrawCircle(800, 300, 8, DARKGREEN);
-
-    DrawText("AMBULANCE x4", 748, 238, 14, DARKGREEN);
-
+    // District labels and road names provide orientation without hiding units.
+    DrawText("RIVERSIDE", 55, 245, 11, (Color){191, 207, 203, 235});
+    DrawText("NORTH MARKET", 493, 245, 11, (Color){191, 207, 203, 235});
+    DrawText("EAST WARD", 936, 245, 11, (Color){191, 207, 203, 235});
+    DrawText("WEST END", 55, 645, 11, (Color){191, 207, 203, 235});
+    DrawText("CENTRAL", 493, 645, 11, (Color){191, 207, 203, 235});
+    DrawText("PARK DISTRICT", 845, 645, 11, (Color){191, 207, 203, 235});
 }
 
 static const char *IncidentTypeName(IncidentType type)
@@ -379,6 +453,32 @@ static int CountActiveForService(const Simulation *simulation, IncidentType serv
     return count;
 }
 
+static int CountFleetForService(const Simulation *simulation, IncidentType service)
+{
+    int count = 0;
+    for (int i = 0; i < simulation->vehicleCount; i++)
+        if (simulation->vehicles[i].serviceType == service) count++;
+    return count;
+}
+
+static float AverageResponseForService(const Simulation *simulation, IncidentType service)
+{
+    int resolved = simulation->resolvedByType[service];
+    return resolved > 0 ? simulation->totalResponseTimeByType[service] / resolved : -1.0f;
+}
+
+static void OnTimeArrivalCounts(const Simulation *simulation, int *onTime, int *recorded)
+{
+    *onTime = 0;
+    *recorded = 0;
+    for (int i = 0; i < simulation->incidentCount; i++) {
+        const Incident *incident = &simulation->incidents[i];
+        if (!incident->responseRecorded) continue;
+        (*recorded)++;
+        if (incident->responseTime <= incident->deadline) (*onTime)++;
+    }
+}
+
 static void DrawServiceSummary(const Simulation *simulation, IncidentType service,
                                int x, int y, Color color)
 {
@@ -387,13 +487,70 @@ static void DrawServiceSummary(const Simulation *simulation, IncidentType servic
                         (Color){20, 42, 60, 255});
     DrawIncidentIcon(iconType, (Vector2){(float)x + 21, (float)y + 20}, 9, color);
     DrawText(ServiceName(service), x + 42, y + 9, 14, RAYWHITE);
-    DrawText(TextFormat("Available %d  |  Active %d", 
+    DrawText(TextFormat("Available %d / %d  |  Active %d",
              SimulationCountAvailableVehicles(simulation, service),
+             CountFleetForService(simulation, service),
              CountActiveForService(simulation, service)), x + 42, y + 31, 11,
              (Color){179, 198, 211, 255});
-    DrawText(TextFormat("Resolved %d  |  Failed %d", simulation->resolvedByType[service],
-             simulation->failedByType[service]), x + 42, y + 46, 10,
+    float average = AverageResponseForService(simulation, service);
+    DrawText(average < 0.0f ? TextFormat("Resolved %d  |  Avg response --",
+             simulation->resolvedByType[service]) :
+             TextFormat("Resolved %d  |  Avg response %.1fs",
+             simulation->resolvedByType[service], average), x + 42, y + 47, 9,
              (Color){141, 161, 175, 255});
+}
+
+static void DrawOperationalSummary(const Simulation *simulation)
+{
+    int onTime, recorded;
+    int available = 0;
+    int waitingForUnits = 0;
+    OnTimeArrivalCounts(simulation, &onTime, &recorded);
+    for (int i = 0; i < simulation->vehicleCount; i++)
+        if (simulation->vehicles[i].available) available++;
+    for (int i = 0; i < simulation->incidentCount; i++) {
+        const Incident *incident = &simulation->incidents[i];
+        if (!IsIncidentFinished(incident) &&
+            CountAssignedUnits(simulation, i) < incident->requiredUnits) waitingForUnits++;
+    }
+
+    DrawLine(1260, 728, 1565, 728, (Color){43, 67, 83, 255});
+    DrawText("CITY OPERATIONS", 1260, 737, 12, (Color){107, 190, 238, 255});
+    DrawText(TextFormat("Available fleet %d / %d", available, simulation->vehicleCount),
+             1260, 756, 10, (Color){177, 195, 207, 255});
+    DrawText(TextFormat("Calls waiting for units %d", waitingForUnits),
+             1260, 772, 10, (Color){177, 195, 207, 255});
+    DrawText(recorded > 0 ? TextFormat("On-time first arrivals %d / %d", onTime, recorded) :
+             "On-time first arrivals -- (no arrivals yet)", 1260, 788, 10,
+             (Color){177, 195, 207, 255});
+}
+
+static void DrawHeaderService(const Simulation *simulation, IncidentType service,
+                              int x, const char *label, Color color)
+{
+    DrawRectangleRounded((Rectangle){(float)x, 12, 156, 58}, 0.12f, 7,
+                         (Color){12, 37, 57, 255});
+    DrawRectangleRoundedLines((Rectangle){(float)x, 12, 156, 58}, 0.12f, 7,
+                              (Color){34, 74, 101, 255});
+    DrawIncidentIcon(service == INCIDENT_ACCIDENT ? INCIDENT_MEDICAL : service,
+                     (Vector2){(float)x + 20, 40}, 11, color);
+    DrawText(label, x + 39, 19, 10, (Color){179, 198, 211, 255});
+    DrawText(TextFormat("%d active  |  %d/%d ready", CountActiveForService(simulation, service),
+             SimulationCountAvailableVehicles(simulation, service),
+             CountFleetForService(simulation, service)), x + 39, 40, 9, RAYWHITE);
+}
+
+static void DrawCityMark(void)
+{
+    Color mark = (Color){61, 151, 207, 255};
+    DrawRectangleRounded((Rectangle){29, 25, 10, 26}, 0.12f, 3, mark);
+    DrawRectangleRounded((Rectangle){42, 16, 13, 35}, 0.12f, 3, mark);
+    DrawRectangleRounded((Rectangle){58, 29, 10, 22}, 0.12f, 3, mark);
+    for (int row = 0; row < 3; row++) {
+        DrawRectangle(32, 30 + row * 6, 2, 2, (Color){194, 229, 248, 255});
+        DrawRectangle(47, 22 + row * 7, 2, 2, (Color){194, 229, 248, 255});
+        DrawRectangle(62, 34 + row * 6, 2, 2, (Color){194, 229, 248, 255});
+    }
 }
 
 static void DrawIncidentQueue(const Simulation *simulation, const int order[MAX_INCIDENTS],
@@ -409,31 +566,53 @@ static void DrawIncidentQueue(const Simulation *simulation, const int order[MAX_
     if (visible == 0) {
         DrawText("No incidents yet", 42, 180, 13, (Color){160, 181, 195, 255});
         DrawText("Click the city map to add one.", 42, 202, 11, (Color){116, 142, 159, 255});
-        return;
+    } else {
+        for (int row = 0; row < visible; row++) {
+            int index = order[row];
+            const Incident *incident = &simulation->incidents[index];
+            float y = queueRowsY + row * queueRowHeight;
+            Rectangle card = {26, y, 254, 55};
+            Color typeColor = IncidentColor(incident->type);
+            Color urgencyColor = incident->severity >= 3 ? (Color){255, 112, 91, 255} :
+                                 incident->severity == 2 ? (Color){255, 189, 85, 255} :
+                                 (Color){130, 181, 209, 255};
+            DrawRectangleRounded(card, 0.08f, 8,
+                index == selectedIncident ? (Color){30, 57, 78, 255} : (Color){18, 38, 54, 255});
+            DrawRectangleRounded((Rectangle){card.x, card.y, 4, card.height}, 0.3f, 4, typeColor);
+            if (index == selectedIncident)
+                DrawRectangleRoundedLines(card, 0.08f, 8, (Color){71, 151, 205, 255});
+
+            DrawIncidentIcon(incident->type, (Vector2){48, y + 27}, 9, typeColor);
+            DrawText(IncidentTypeName(incident->type), 67, (int)y + 7, 12, RAYWHITE);
+            DrawText(IncidentStatusName(incident->status), 67, (int)y + 25, 10,
+                     IsIncidentFinished(incident) ? (incident->status == INCIDENT_FAILED ? RED : GREEN) :
+                     (Color){166, 188, 202, 255});
+            DrawText(TextFormat("SEV %d   UNITS %d/%d", incident->severity,
+                     CountAssignedUnits(simulation, index), incident->requiredUnits),
+                     67, (int)y + 41, 9, urgencyColor);
+            DrawText(TextFormat("P%.0f", SimulationIncidentPriority(incident)), 238,
+                     (int)y + 41, 9, urgencyColor);
+        }
     }
 
-    for (int row = 0; row < visible; row++) {
-        int index = order[row];
-        const Incident *incident = &simulation->incidents[index];
-        float y = queueRowsY + row * queueRowHeight;
-        Rectangle card = {26, y, 254, 70};
-        Color typeColor = IncidentColor(incident->type);
-        DrawRectangleRounded(card, 0.08f, 8,
-            index == selectedIncident ? (Color){30, 57, 78, 255} : (Color){18, 38, 54, 255});
-        DrawRectangleRounded((Rectangle){card.x, card.y, 4, card.height}, 0.3f, 4, typeColor);
-        if (index == selectedIncident)
-            DrawRectangleRoundedLines(card, 0.08f, 8, (Color){71, 151, 205, 255});
-
-        DrawIncidentIcon(incident->type, (Vector2){48, y + 27}, 10, typeColor);
-        DrawText(IncidentTypeName(incident->type), 67, (int)y + 10, 12, RAYWHITE);
-        DrawText(IncidentStatusName(incident->status), 67, (int)y + 29, 10,
-                 IsIncidentFinished(incident) ? (incident->status == INCIDENT_FAILED ? RED : GREEN) :
-                 (Color){166, 188, 202, 255});
-        DrawText(TextFormat("SEV %d   P%.0f", incident->severity,
-                 SimulationIncidentPriority(incident)), 67, (int)y + 48, 10,
-                 incident->severity >= 3 ? (Color){255, 112, 91, 255} :
-                 incident->severity == 2 ? (Color){255, 189, 85, 255} :
-                 (Color){130, 181, 209, 255});
+    // Compact resource overview follows the queue, like the Control Room reference.
+    // It remains visible even with a full eight-call queue.
+    int resourceY = (int)(queueRowsY + visible * queueRowHeight + 8.0f);
+    if (resourceY < 690) resourceY = 690;
+    DrawLine(34, resourceY, 272, resourceY, (Color){43, 67, 83, 255});
+    DrawText("RESOURCE OVERVIEW", 34, resourceY + 9, 12,
+             (Color){107, 190, 238, 255});
+    const IncidentType services[] = {INCIDENT_FIRE, INCIDENT_CRIME, INCIDENT_ACCIDENT};
+    const char *names[] = {"FIRE", "POLICE", "EMS"};
+    for (int i = 0; i < 3; i++) {
+        IncidentType service = services[i];
+        int y = resourceY + 30 + i * 24;
+        int available = SimulationCountAvailableVehicles(simulation, service);
+        int total = CountFleetForService(simulation, service);
+        DrawCircle(42, y + 7, 4, IncidentColor(service == INCIDENT_ACCIDENT ? INCIDENT_MEDICAL : service));
+        DrawText(names[i], 54, y, 9, (Color){177, 195, 207, 255});
+        DrawText(TextFormat("%d / %d available", available, total), 157, y, 9,
+                 available > 0 ? (Color){196, 211, 220, 255} : ORANGE);
     }
 }
 
@@ -458,20 +637,28 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedIncide
                                 unsigned int selectedVehicleMask)
 {
     DrawPanel(detailsPanel);
-    DrawText("INCIDENT DETAILS", 1260, 120, 17, RAYWHITE);
-    DrawButton(dispatchModeButton,
-               simulation->dispatchMode == DISPATCH_AUTOMATIC ? "AUTO DISPATCH" : "MANUAL DISPATCH",
-               simulation->dispatchMode == DISPATCH_AUTOMATIC ? (Color){34, 111, 82, 255} : BLUE);
+    DrawText("SELECTED INCIDENT", 1260, 120, 17, RAYWHITE);
+    DrawText(simulation->dispatchMode == DISPATCH_AUTOMATIC ? "AUTO" : "MANUAL",
+             1490, 124, 10, simulation->dispatchMode == DISPATCH_AUTOMATIC ? GREEN : SKYBLUE);
     DrawLine(1260, 146, 1565, 146, (Color){43, 67, 83, 255});
 
     if (selectedIncident >= 0 && selectedIncident < simulation->incidentCount) {
         const Incident *incident = &simulation->incidents[selectedIncident];
         Color typeColor = IncidentColor(incident->type);
-        DrawIncidentIcon(incident->type, (Vector2){1283, 176}, 16, typeColor);
-        DrawText(IncidentTypeName(incident->type), 1310, 158, 15, RAYWHITE);
-        DrawText(IncidentStatusName(incident->status), 1310, 180, 11,
+        DrawRectangleRounded((Rectangle){1258, 154, 48, 48}, 0.16f, 8,
+                             (Color){24, 48, 66, 255});
+        DrawIncidentIcon(incident->type, (Vector2){1282, 178}, 16, typeColor);
+        DrawText(IncidentTypeName(incident->type), 1318, 157, 15, RAYWHITE);
+        DrawText(IncidentStatusName(incident->status), 1318, 180, 11,
                  IsIncidentFinished(incident) ? (incident->status == INCIDENT_FAILED ? RED : GREEN) :
                  (Color){122, 194, 232, 255});
+        const char *priorityName = incident->severity >= 3 ? "HIGH" :
+                                   incident->severity == 2 ? "MEDIUM" : "LOW";
+        Color priorityColor = incident->severity >= 3 ? (Color){185, 45, 55, 255} :
+                              incident->severity == 2 ? (Color){184, 119, 25, 255} :
+                              (Color){38, 130, 89, 255};
+        DrawRectangleRounded((Rectangle){1452, 158, 112, 25}, 0.22f, 6, priorityColor);
+        DrawText(TextFormat("%s PRIORITY", priorityName), 1462, 165, 9, RAYWHITE);
         DrawLine(1260, 210, 1565, 210, (Color){43, 67, 83, 255});
 
         float remaining = incident->deadline - incident->ageTime;
@@ -537,6 +724,10 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedIncide
                          ServiceUnitNumber(simulation, i)), 1300, y + 1, 10, RAYWHITE);
                 DrawText(vehicle->arrived ? "On scene" : "En route", 1300, y + 13, 9,
                          vehicle->arrived ? GREEN : (Color){156, 188, 207, 255});
+                float unitEta = SimulationEstimateUnitETA(simulation, i, selectedIncident);
+                DrawText(vehicle->arrived ? "ARRIVED" :
+                         unitEta < 0.0f ? "ETA --" : TextFormat("ETA %.1fs", unitEta),
+                         1480, y + 5, 9, (Color){107, 190, 238, 255});
                 shown++;
             }
             if (shown == 0)
@@ -573,6 +764,7 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedIncide
     DrawServiceSummary(simulation, INCIDENT_FIRE, 1254, 514, IncidentColor(INCIDENT_FIRE));
     DrawServiceSummary(simulation, INCIDENT_CRIME, 1254, 584, IncidentColor(INCIDENT_CRIME));
     DrawServiceSummary(simulation, INCIDENT_ACCIDENT, 1254, 654, IncidentColor(INCIDENT_MEDICAL));
+    DrawOperationalSummary(simulation);
 }
 
 static Rectangle FitCityToPanel(Rectangle panel)
@@ -593,7 +785,7 @@ static Vector2 MapCanvasToCity(Vector2 point, Rectangle cityView)
 }
 
 static void DrawMapContents(const Simulation *simulation, int selectedIncident,
-                           Rectangle cityView)
+                           Rectangle cityView, bool showRoutes, bool showCivilianTraffic)
 {
     Camera2D mapCamera = {0};
     mapCamera.target = (Vector2){CITY_WIDTH * 0.5f, CITY_HEIGHT * 0.5f};
@@ -609,10 +801,11 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
                      (int)(mapClip.height * UI_RENDER_SCALE));
     BeginMode2D(mapCamera);
     DrawCity();
-    for (int i = 0; i < simulation->civilianCount; i++)
-        DrawCivilianCar(&simulation->civilianCars[i]);
+    if (showCivilianTraffic)
+        for (int i = 0; i < simulation->civilianCount; i++)
+            DrawCivilianCar(&simulation->civilianCars[i]);
 
-    for (int i = 0; i < simulation->vehicleCount; i++) {
+    for (int i = 0; showRoutes && i < simulation->vehicleCount; i++) {
         const Vehicle *vehicle = &simulation->vehicles[i];
         if (vehicle->available || vehicle->arrived || vehicle->routeCount < 2) continue;
 
@@ -652,6 +845,77 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
     EndScissorMode();
 }
 
+static void DrawModalBackdrop(void)
+{
+    DrawRectangle(0, 0, UI_WIDTH, UI_HEIGHT, (Color){0, 0, 0, 155});
+    DrawPanel(modalPanel);
+}
+
+static void DrawReportsOverlay(const Simulation *simulation)
+{
+    int resolved = SimulationCountStatus(simulation, INCIDENT_RESOLVED);
+    int onTime, recorded;
+    float totalResponse = 0.0f;
+    int responseCount = 0;
+    OnTimeArrivalCounts(simulation, &onTime, &recorded);
+    for (int service = 0; service < SERVICE_COUNT; service++) {
+        totalResponse += simulation->totalResponseTimeByType[service];
+        responseCount += simulation->resolvedByType[service];
+    }
+
+    DrawModalBackdrop();
+    DrawText("SIMULATION REPORT", 510, 245, 24, RAYWHITE);
+    DrawText("Summary from the current simulation", 512, 280, 13,
+             (Color){154, 181, 198, 255});
+    DrawLine(510, 310, 1090, 310, (Color){43, 67, 83, 255});
+    DrawText(TextFormat("Incidents created             %d", simulation->incidentCount),
+             520, 335, 15, RAYWHITE);
+    DrawText(TextFormat("Active / resolved / failed    %d / %d / %d",
+             SimulationCountUnresolved(simulation), resolved,
+             SimulationCountStatus(simulation, INCIDENT_FAILED)), 520, 369, 15, RAYWHITE);
+    DrawText(responseCount > 0 ? TextFormat("Overall average response     %.1fs",
+             totalResponse / responseCount) : "Overall average response     --",
+             520, 403, 15, RAYWHITE);
+    DrawText(recorded > 0 ? TextFormat("First arrivals on time       %d / %d",
+             onTime, recorded) : "First arrivals on time       -- (no arrivals yet)",
+             520, 437, 15, RAYWHITE);
+    DrawLine(510, 473, 1090, 473, (Color){43, 67, 83, 255});
+    DrawText("SERVICE RESPONSE AVERAGES", 520, 489, 13,
+             (Color){107, 190, 238, 255});
+    for (int i = 0; i < SERVICE_COUNT; i++) {
+        IncidentType service = i == 2 ? INCIDENT_ACCIDENT : (IncidentType)i;
+        float average = AverageResponseForService(simulation, service);
+        DrawText(average >= 0.0f ? TextFormat("%-15s  %.1fs  (%d resolved)",
+                 ServiceName(service), average, simulation->resolvedByType[service]) :
+                 TextFormat("%-15s  --  (no resolved calls)", ServiceName(service)),
+                 520, 521 + i * 25, 13, RAYWHITE);
+    }
+    DrawButton(modalCloseButton, "CLOSE", BLUE);
+}
+
+static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
+                                const Simulation *simulation)
+{
+    DrawModalBackdrop();
+    DrawText("CONTROL ROOM SETTINGS", 510, 245, 24, RAYWHITE);
+    DrawText("Display options apply to the city map only.", 512, 280, 13,
+             (Color){154, 181, 198, 255});
+    DrawButton(routesToggleButton, showRoutes ? "RESPONSE ROUTES  ON" : "RESPONSE ROUTES  OFF",
+               showRoutes ? (Color){31, 92, 132, 255} : DARKGRAY);
+    DrawButton(civilianToggleButton,
+               showCivilianTraffic ? "CIVILIAN TRAFFIC  ON" : "CIVILIAN TRAFFIC  OFF",
+               showCivilianTraffic ? (Color){31, 92, 132, 255} : DARKGRAY);
+    DrawText(TextFormat("Dispatch mode: %s", simulation->dispatchMode == DISPATCH_AUTOMATIC ?
+             "Automatic" : "Manual"), 550, 480, 13, RAYWHITE);
+    DrawText(TextFormat("Traffic level: %s", SimulationTrafficLevelName(simulation->trafficLevel)),
+             550, 506, 13, RAYWHITE);
+    DrawText("Keyboard: 1-4 incident | Space pause | S slow | F fast | N step",
+             550, 550, 11, (Color){154, 181, 198, 255});
+    DrawText("T traffic | M simulate queue | C compare | R reset | Esc close",
+             550, 571, 11, (Color){154, 181, 198, 255});
+    DrawButton(modalCloseButton, "CLOSE", BLUE);
+}
+
 
 
 int main(void)
@@ -686,6 +950,9 @@ int main(void)
     bool fastForward = false;
     bool slowMotion = false;
     bool comparisonReady = false;
+    bool showRoutes = true;
+    bool showCivilianTraffic = true;
+    UIOverlay overlay = OVERLAY_NONE;
     int selectedIncident = -1;
     unsigned int selectedVehicleMask = 0;
     StrategyComparison comparison = {0};
@@ -733,6 +1000,7 @@ int main(void)
             comparisonReady = true;
             selectedIncident = -1;
         }
+        if (IsKeyPressed(KEY_ESCAPE)) overlay = OVERLAY_NONE;
 
         if (IsKeyPressed(KEY_R)) {
             SimulationInit(&simulation);
@@ -742,6 +1010,7 @@ int main(void)
             comparisonReady = false;
             selectedIncident = -1;
             selectedVehicleMask = 0;
+            overlay = OVERLAY_NONE;
         }
 
 
@@ -757,7 +1026,17 @@ int main(void)
 
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mouseInCanvas) {
 
-            if (CheckCollisionPointRec(mouse, compareButton)) {
+            if (overlay != OVERLAY_NONE) {
+                if (CheckCollisionPointRec(mouse, modalCloseButton)) {
+                    overlay = OVERLAY_NONE;
+                } else if (overlay == OVERLAY_SETTINGS &&
+                           CheckCollisionPointRec(mouse, routesToggleButton)) {
+                    showRoutes = !showRoutes;
+                } else if (overlay == OVERLAY_SETTINGS &&
+                           CheckCollisionPointRec(mouse, civilianToggleButton)) {
+                    showCivilianTraffic = !showCivilianTraffic;
+                }
+            } else if (CheckCollisionPointRec(mouse, compareButton)) {
 
                 SimulationRunStrategyComparison(&comparison);
                 comparisonReady = true;
@@ -799,6 +1078,14 @@ int main(void)
 
                 stepRequested = true;
 
+            } else if (CheckCollisionPointRec(mouse, dispatchButton)) {
+
+                if (simulation.dispatchMode == DISPATCH_MANUAL && selectedIncident >= 0 &&
+                    CountSelectedVehicles(selectedVehicleMask) > 0) {
+                    SimulationDispatchVehicles(&simulation, selectedIncident, selectedVehicleMask);
+                    selectedVehicleMask = 0;
+                }
+
             } else if (CheckCollisionPointRec(mouse, trafficButton)) {
 
                 SimulationSetTrafficLevel(&simulation,
@@ -807,6 +1094,14 @@ int main(void)
             } else if (CheckCollisionPointRec(mouse, simulateButton)) {
 
                 SimulationSimulateQueue(&simulation);
+
+            } else if (CheckCollisionPointRec(mouse, reportsButton)) {
+
+                overlay = OVERLAY_REPORTS;
+
+            } else if (CheckCollisionPointRec(mouse, settingsButton)) {
+
+                overlay = OVERLAY_SETTINGS;
 
             } else if (CheckCollisionPointRec(mouse, resetButton)) {
 
@@ -888,31 +1183,55 @@ int main(void)
         BeginMode2D(renderCamera);
 
         DrawRectangle(0, 0, UI_WIDTH, UI_HEIGHT, (Color){7, 17, 29, 255});
-        DrawRectangle(0, 0, UI_WIDTH, 88, (Color){11, 29, 46, 255});
-        DrawText("EMERGENCY CITY SIMULATION", 28, 17, 25, RAYWHITE);
-        DrawText("CONTROL ROOM  /  LIVE DISPATCH", 30, 52, 12,
+        DrawRectangle(0, 0, UI_WIDTH, 88, (Color){9, 25, 42, 255});
+        DrawLine(0, 87, UI_WIDTH, 87, (Color){34, 74, 101, 255});
+        DrawCityMark();
+        DrawText("EMERGENCY CITY SIMULATION", 82, 13, 23, RAYWHITE);
+        DrawText("CONTROL ROOM  /  LIVE DISPATCH", 84, 49, 11,
                  (Color){124, 190, 222, 255});
         DrawText(TextFormat("CALLS %d   ACTIVE %d   RESOLVED %d   FAILED %d",
                  simulation.incidentCount, SimulationCountUnresolved(&simulation),
                  SimulationCountStatus(&simulation, INCIDENT_RESOLVED),
                  SimulationCountStatus(&simulation, INCIDENT_FAILED)),
-                 920, 32, 13, (Color){177, 198, 211, 255});
+                 500, 21, 13, (Color){177, 198, 211, 255});
+        int onTime, arrivals;
+        OnTimeArrivalCounts(&simulation, &onTime, &arrivals);
+        DrawText(arrivals > 0 ? TextFormat("ON-TIME FIRST ARRIVALS  %d / %d", onTime, arrivals) :
+                 "ON-TIME FIRST ARRIVALS  --", 500, 47, 10,
+                 (Color){124, 190, 222, 255});
+        DrawHeaderService(&simulation, INCIDENT_FIRE, 805, "FIRE", IncidentColor(INCIDENT_FIRE));
+        DrawHeaderService(&simulation, INCIDENT_CRIME, 970, "POLICE", IncidentColor(INCIDENT_CRIME));
+        DrawHeaderService(&simulation, INCIDENT_ACCIDENT, 1135, "AMBULANCE", IncidentColor(INCIDENT_MEDICAL));
+        DrawRectangleRounded((Rectangle){1300, 18, 272, 50}, 0.12f, 7,
+                             (Color){17, 42, 60, 255});
+        DrawText(TextFormat("CIVILIAN CARS  %d", simulation.civilianCount),
+                 1315, 25, 10, (Color){179, 198, 211, 255});
+        DrawText(TextFormat("TRAFFIC  %s", SimulationTrafficLevelName(simulation.trafficLevel)),
+                 1315, 43, 12, RAYWHITE);
 
         DrawIncidentQueue(&simulation, queueOrder, queueCount, selectedIncident);
         DrawPanel(mapPanel);
         DrawText("CITY MAP", 320, 119, 16, RAYWHITE);
         DrawText("Click map to create or inspect a call", 420, 122, 11,
                  (Color){139, 164, 179, 255});
-        DrawText("FIRE", 940, 121, 10, RED);
-        DrawText("POLICE", 986, 121, 10, BLUE);
-        DrawText("AMBULANCE", 1052, 121, 10, DARKGREEN);
+        DrawIncidentIcon(INCIDENT_FIRE, (Vector2){940, 125}, 7, RED);
+        DrawText("Fire", 952, 120, 10, RAYWHITE);
+        DrawVehicleIcon(INCIDENT_CRIME, (Vector2){1000, 125});
+        DrawText("Police", 1014, 120, 10, RAYWHITE);
+        DrawVehicleIcon(INCIDENT_ACCIDENT, (Vector2){1070, 125});
+        DrawText("EMS", 1084, 120, 10, RAYWHITE);
+        DrawLine(1112, 125, 1132, 125, (Color){72, 181, 255, 255});
+        DrawText("Route", 1138, 120, 10, RAYWHITE);
+        DrawCircleLines(1180, 125, 6, ORANGE);
+        DrawText("Call", 1190, 120, 10, RAYWHITE);
         DrawRectangleRounded(mapClip, 0.02f, 8, (Color){14, 27, 37, 255});
 
         // The map uses its own camera and draws directly to the 2x render
         // texture. End the UI camera before that pass, then restore it for the
         // details panel and controls so they retain the correct size/position.
         EndMode2D();
-        DrawMapContents(&simulation, selectedIncident, cityView);
+        DrawMapContents(&simulation, selectedIncident, cityView,
+                        showRoutes, showCivilianTraffic);
 
         BeginMode2D(renderCamera);
         DrawIncidentDetails(&simulation, selectedIncident, comparisonReady, &comparison,
@@ -921,24 +1240,38 @@ int main(void)
         DrawPanel((Rectangle){18, 818, 1564, 68});
         DrawText("SIMULATION CONTROLS", 34, 833, 13,
                  (Color){132, 194, 225, 255});
-        DrawText("1-4 type | SPACE pause | S slow | F fast | N step | T traffic | R reset",
-                 34, 858, 10, (Color){158, 180, 193, 255});
+        DrawText("1-4 place | SPACE pause | S slow | F fast | N step",
+                 34, 853, 9, (Color){158, 180, 193, 255});
+        DrawText("T traffic | C compare | M simulate queue | R reset",
+                 34, 868, 9, (Color){158, 180, 193, 255});
         DrawButton(compareButton, "COMPARE", BLUE);
         DrawButton(pauseButton, paused ? "RESUME" : "PAUSE", paused ? DARKGREEN : DARKGRAY);
-        DrawButton(slowButton, slowMotion ? "SLOW x0.25 ON" : "SLOW x0.25",
+        DrawButton(slowButton, slowMotion ? "SLOW ON" : "SLOW",
                    slowMotion ? DARKBLUE : DARKGRAY);
-        DrawButton(normalButton, (!slowMotion && !fastForward) ? "NORMAL x1 ON" : "NORMAL x1",
+        DrawButton(normalButton, (!slowMotion && !fastForward) ? "1x ON" : "1x",
                    (!slowMotion && !fastForward) ? DARKGREEN : DARKGRAY);
-        DrawButton(fastButton, fastForward ? "FAST x8 ON" : "FAST x8",
+        DrawButton(fastButton, fastForward ? "FAST ON" : "FAST x8",
                    fastForward ? DARKGREEN : DARKGRAY);
         DrawButton(stepButton, "STEP 0.1", (Color){78, 91, 110, 255});
+        int dispatchReady = simulation.dispatchMode == DISPATCH_MANUAL && selectedIncident >= 0 &&
+                            CountSelectedVehicles(selectedVehicleMask) > 0;
+        DrawButton(dispatchButton, "DISPATCH", dispatchReady ? BLUE : DARKGRAY);
         DrawButton(trafficButton,
-                   TextFormat("TRAF %s", SimulationTrafficLevelName(simulation.trafficLevel)),
+                   TextFormat("TRAFFIC %s", SimulationTrafficLevelName(simulation.trafficLevel)),
                    simulation.trafficLevel == TRAFFIC_HEAVY ? ORANGE :
                    simulation.trafficLevel == TRAFFIC_MEDIUM ? (Color){176, 122, 48, 255} :
                    DARKGRAY);
+        DrawButton(dispatchModeButton,
+                   simulation.dispatchMode == DISPATCH_AUTOMATIC ? "MODE AUTO" : "MODE MANUAL",
+                   simulation.dispatchMode == DISPATCH_AUTOMATIC ? (Color){34, 111, 82, 255} : BLUE);
         DrawButton(simulateButton, "SIM QUEUE", BLUE);
+        DrawButton(reportsButton, "REPORTS", (Color){38, 75, 103, 255});
+        DrawButton(settingsButton, "SETTINGS", (Color){38, 75, 103, 255});
         DrawButton(resetButton, "RESET", MAROON);
+
+        if (overlay == OVERLAY_REPORTS) DrawReportsOverlay(&simulation);
+        else if (overlay == OVERLAY_SETTINGS)
+            DrawSettingsOverlay(showRoutes, showCivilianTraffic, &simulation);
 
         EndMode2D();
         EndTextureMode();

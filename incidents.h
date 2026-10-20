@@ -8,6 +8,9 @@
 #define SERVICE_COUNT 3
 #define MAX_ROUTE_POINTS 16
 #define MAX_CIVILIAN_CARS 24
+#define MAX_CALLS MAX_INCIDENTS
+#define CALL_REPORT_LENGTH 96
+#define CALL_REASON_LENGTH 128
 
 typedef enum {
     INCIDENT_FIRE = 0,
@@ -32,6 +35,20 @@ typedef enum {
 } TrafficLevel;
 
 typedef struct {
+    Vector2 location;
+    float receivedAt;
+    float classifiedAt;
+    float dispatchedAt;
+    char report[CALL_REPORT_LENGTH];
+    char decisionReason[CALL_REASON_LENGTH];
+    IncidentType classifiedType;
+    int severity;
+    int classified;
+    int dispatched;
+    int incidentIndex;
+} EmergencyCall;
+
+typedef struct {
     IncidentType type;
     IncidentStatus status;
     Vector2 position;
@@ -45,6 +62,7 @@ typedef struct {
     int severity;
     int requiredUnits;
     int responseRecorded;
+    int callIndex;
 } Incident;
 
 typedef struct {

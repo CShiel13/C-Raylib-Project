@@ -2,6 +2,8 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <ctype.h>
+#include <stdio.h>
 
 #define ROAD_NODE_COUNT 8
 #define ROAD_EDGE_COUNT 7
@@ -329,6 +331,23 @@ float SimulationEstimateIncidentETA(const Simulation *simulation, int incidentIn
     return estimates[incident->requiredUnits - 1];
 }
 
+float SimulationEstimateUnitETA(const Simulation *simulation, int vehicleIndex,
+                                int incidentIndex)
+{
+    if (!simulation || vehicleIndex < 0 || vehicleIndex >= simulation->vehicleCount ||
+        incidentIndex < 0 || incidentIndex >= simulation->incidentCount) return -1.0f;
+    const Vehicle *vehicle = &simulation->vehicles[vehicleIndex];
+    const Incident *incident = &simulation->incidents[incidentIndex];
+    if (incident->status == INCIDENT_RESOLVED || incident->status == INCIDENT_FAILED ||
+        vehicle->serviceType != SimulationServiceForIncident(incident->type)) return -1.0f;
+    if (vehicle->assignedIncident == incidentIndex) {
+        if (vehicle->arrived) return 0.0f;
+        return EstimateRouteETA(simulation, vehicle, vehicle->routeIndex);
+    }
+    if (vehicle->available) return EstimateVehicleETA(simulation, vehicle, incident->position);
+    return -1.0f;
+}
+
 
 
 IncidentType SimulationServiceForIncident(IncidentType type)
@@ -511,6 +530,8 @@ void SimulationInit(Simulation *simulation)
     simulation->dispatchMode = DISPATCH_AUTOMATIC;
     simulation->trafficLevel = TRAFFIC_LIGHT;
     simulation->civilianCount = 0;
+    simulation->callCount = 0;
+    simulation->elapsedTime = 0.0f;
 
 
 
@@ -841,6 +862,7 @@ int SimulationCreateIncident(Simulation *simulation, IncidentType type, Vector2 
     *in = (Incident){0};
 
     in->type = type;
+    in->callIndex = -1;
 
     in->status = INCIDENT_PENDING;
 
@@ -868,6 +890,255 @@ int SimulationCreateIncident(Simulation *simulation, IncidentType type, Vector2 
 
 }
 
+int SimulationCreateCall(Simulation *simulation, Vector2 location, const char *report)
+{
+    if (!simulation || simulation->callCount >= MAX_CALLS || !report) return 0;
+    EmergencyCall *call = &simulation->calls[simulation->callCount];
+    *call = (EmergencyCall){0};
+    call->location = location;
+    call->receivedAt = simulation->elapsedTime;
+    call->classifiedType = INCIDENT_FIRE;
+    call->incidentIndex = -1;
+    snprintf(call->report, sizeof(call->report), "%s", report);
+    snprintf(call->decisionReason, sizeof(call->decisionReason),
+             "Awaiting operator classification.");
+    simulation->callCount++;
+    return 1;
+}
+
+int SimulationClassifyCall(Simulation *simulation, int callIndex,
+                           IncidentType type, int severity)
+{
+    if (!simulation || callIndex < 0 || callIndex >= simulation->callCount ||
+        type < INCIDENT_FIRE || type > INCIDENT_MEDICAL || severity < 1 || severity > 3)
+        return 0;
+    EmergencyCall *call = &simulation->calls[callIndex];
+    if (call->dispatched) return 0;
+
+    Incident *incident = NULL;
+    if (call->incidentIndex < 0) {
+        if (!SimulationCreateIncident(simulation, type, call->location)) return 0;
+        call->incidentIndex = simulation->incidentCount - 1;
+        incident = &simulation->incidents[call->incidentIndex];
+        incident->callIndex = callIndex;
+        incident->ageTime = fmaxf(0.0f, simulation->elapsedTime - call->receivedAt);
+        incident->waitTime = incident->ageTime;
+        call->classifiedAt = simulation->elapsedTime;
+    } else {
+        incident = &simulation->incidents[call->incidentIndex];
+        if (incident->status == INCIDENT_RESOLVED || incident->status == INCIDENT_FAILED ||
+            CountAssignedUnits(simulation, call->incidentIndex) > 0) return 0;
+        call->classifiedAt = simulation->elapsedTime;
+    }
+
+    incident->type = type;
+    incident->severity = severity;
+    incident->requiredUnits = GetRequiredUnits(type, severity);
+    incident->deadline = type == INCIDENT_FIRE ? 35.0f :
+                         type == INCIDENT_CRIME ? 30.0f :
+                         type == INCIDENT_MEDICAL ? 25.0f : 30.0f;
+    incident->workRequired = type == INCIDENT_FIRE ? 5.0f :
+                             type == INCIDENT_CRIME ? 3.5f :
+                             type == INCIDENT_MEDICAL ? 3.0f : 4.0f;
+    call->classifiedType = type;
+    call->severity = severity;
+    call->classified = 1;
+    return 1;
+}
+
+static int HasWord(const char *text, const char *word)
+{
+    if (!text || !word || !*word) return 0;
+    for (const char *start = text; *start; start++) {
+        const char *a = start;
+        const char *b = word;
+        while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+            a++;
+            b++;
+        }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+static void ClassifyCallFromReport(const EmergencyCall *call, IncidentType *type,
+                                   int *severity)
+{
+    const char *report = call->report;
+    if (HasWord(report, "smoke") || HasWord(report, "fire") ||
+        HasWord(report, "flame") || HasWord(report, "burning")) {
+        *type = INCIDENT_FIRE;
+        *severity = HasWord(report, "trapped") || HasWord(report, "spreading") ? 3 :
+                    HasWord(report, "building") || HasWord(report, "inside") ? 2 : 1;
+    } else if (HasWord(report, "collapsed") || HasWord(report, "unresponsive") ||
+               HasWord(report, "injured") || HasWord(report, "breathing") ||
+               HasWord(report, "medical")) {
+        *type = INCIDENT_MEDICAL;
+        *severity = HasWord(report, "unresponsive") || HasWord(report, "not breathing") ? 3 :
+                    HasWord(report, "injured") || HasWord(report, "urgent") ? 2 : 1;
+    } else if (HasWord(report, "collision") || HasWord(report, "collided") ||
+               HasWord(report, "crash") || HasWord(report, "vehicle") ||
+               HasWord(report, "traffic")) {
+        *type = INCIDENT_ACCIDENT;
+        *severity = HasWord(report, "multiple") || HasWord(report, "serious injury") ? 3 :
+                    HasWord(report, "blocked") || HasWord(report, "injur") ? 2 : 1;
+    } else {
+        *type = INCIDENT_CRIME;
+        *severity = HasWord(report, "weapon") || HasWord(report, "assault") ? 3 :
+                    HasWord(report, "in progress") || HasWord(report, "break-in") ? 2 : 1;
+    }
+}
+
+static void AssignVehicle(Simulation *simulation, int vehicleIndex, int incidentIndex)
+{
+    Vehicle *vehicle = &simulation->vehicles[vehicleIndex];
+    Incident *incident = &simulation->incidents[incidentIndex];
+    IncidentType service = SimulationServiceForIncident(incident->type);
+    vehicle->available = 0;
+    vehicle->assignedIncident = incidentIndex;
+    vehicle->arrived = 0;
+    BuildVehicleRoute(vehicle, incident->position);
+    simulation->dispatchedByType[service]++;
+}
+
+int SimulationDispatchCallVehicles(Simulation *simulation, int callIndex,
+                                   unsigned int vehicleMask)
+{
+    if (!simulation || callIndex < 0 || callIndex >= simulation->callCount || !vehicleMask)
+        return 0;
+    EmergencyCall *call = &simulation->calls[callIndex];
+    if (!call->classified || call->dispatched || call->incidentIndex < 0 ||
+        call->incidentIndex >= simulation->incidentCount) return 0;
+    Incident *incident = &simulation->incidents[call->incidentIndex];
+    if (incident->status == INCIDENT_RESOLVED || incident->status == INCIDENT_FAILED)
+        return 0;
+
+    unsigned int validMask = (1u << simulation->vehicleCount) - 1u;
+    if ((vehicleMask & ~validMask) != 0) return 0;
+    int remaining = incident->requiredUnits - CountAssignedUnits(simulation, call->incidentIndex);
+    int selected = 0;
+    IncidentType service = SimulationServiceForIncident(incident->type);
+    for (int i = 0; i < simulation->vehicleCount; i++) {
+        if (!(vehicleMask & (1u << i))) continue;
+        const Vehicle *vehicle = &simulation->vehicles[i];
+        if (!vehicle->available || vehicle->serviceType != service) return 0;
+        selected++;
+    }
+    if (selected != remaining) return 0;
+
+    for (int i = 0; i < simulation->vehicleCount; i++)
+        if (vehicleMask & (1u << i)) AssignVehicle(simulation, i, call->incidentIndex);
+    incident->status = INCIDENT_DISPATCHED;
+    call->dispatched = 1;
+    call->dispatchedAt = simulation->elapsedTime;
+    snprintf(call->decisionReason, sizeof(call->decisionReason),
+             "Manual operator dispatched %d suitable %s unit%s.", selected,
+             SimulationServiceForIncident(incident->type) == INCIDENT_FIRE ? "fire" :
+             SimulationServiceForIncident(incident->type) == INCIDENT_CRIME ? "police" : "ambulance",
+             selected == 1 ? "" : "s");
+    return selected;
+}
+
+void SimulationProcessOperator(Simulation *simulation)
+{
+    if (!simulation || simulation->dispatchMode != DISPATCH_AUTOMATIC) return;
+    int order[MAX_CALLS];
+    int count = 0;
+
+    // First classify every report. Then rank calls so urgent deadlines are not
+    // delayed by a lower-priority call that happened to be created first.
+    for (int callIndex = 0; callIndex < simulation->callCount; callIndex++) {
+        EmergencyCall *call = &simulation->calls[callIndex];
+        if (call->dispatched) continue;
+        if (!call->classified) {
+            IncidentType type;
+            int severity;
+            ClassifyCallFromReport(call, &type, &severity);
+            float callAge = fmaxf(0.0f, simulation->elapsedTime - call->receivedAt);
+            float deadline = type == INCIDENT_FIRE ? 35.0f :
+                             type == INCIDENT_MEDICAL ? 25.0f : 30.0f;
+            if (callAge >= deadline * 0.78f && severity < 3) severity = 3;
+            else if (callAge >= deadline * 0.5f && severity < 2) severity = 2;
+            if (!SimulationClassifyCall(simulation, callIndex, type, severity)) continue;
+        }
+        if (call->incidentIndex < 0 || call->incidentIndex >= simulation->incidentCount) continue;
+        int insertAt = count;
+        if (simulation->dispatchStrategy == DISPATCH_PRIORITY) {
+            const Incident *incident = &simulation->incidents[call->incidentIndex];
+            float priority = SimulationIncidentPriority(incident);
+            while (insertAt > 0) {
+                const EmergencyCall *previousCall = &simulation->calls[order[insertAt - 1]];
+                const Incident *previous = &simulation->incidents[previousCall->incidentIndex];
+                float previousPriority = SimulationIncidentPriority(previous);
+                if (previousPriority > priority ||
+                    (previousPriority == priority && previousCall->receivedAt <= call->receivedAt)) break;
+                order[insertAt] = order[insertAt - 1];
+                insertAt--;
+            }
+        }
+        order[insertAt] = callIndex;
+        count++;
+    }
+
+    for (int ranked = 0; ranked < count; ranked++) {
+        int callIndex = order[ranked];
+        EmergencyCall *call = &simulation->calls[callIndex];
+
+        Incident *incident = &simulation->incidents[call->incidentIndex];
+        if (incident->status == INCIDENT_RESOLVED || incident->status == INCIDENT_FAILED) continue;
+        IncidentType service = SimulationServiceForIncident(incident->type);
+        int available = SimulationCountAvailableVehicles(simulation, service);
+        int needed = incident->requiredUnits - CountAssignedUnits(simulation, call->incidentIndex);
+        if (needed < 0) needed = 0;
+        if (available < needed) {
+            const char *level = incident->severity >= 3 ? "High" :
+                                incident->severity == 2 ? "Medium" : "Low";
+            snprintf(call->decisionReason, sizeof(call->decisionReason),
+                     "%s-severity %s; %d/%d suitable units free. Waiting and retrying.",
+                     level, incident->type == INCIDENT_FIRE ? "fire" :
+                     incident->type == INCIDENT_CRIME ? "crime" :
+                     incident->type == INCIDENT_ACCIDENT ? "road collision" : "medical call",
+                     available, needed);
+            continue;
+        }
+
+        unsigned int chosenMask = 0;
+        for (int n = 0; n < needed; n++) {
+            int best = -1;
+            float bestEta = 1.0e30f;
+            for (int i = 0; i < simulation->vehicleCount; i++) {
+                Vehicle *vehicle = &simulation->vehicles[i];
+                if (!vehicle->available || vehicle->serviceType != service ||
+                    (chosenMask & (1u << i))) continue;
+                float eta = EstimateVehicleETA(simulation, vehicle, incident->position);
+                if (eta < bestEta) { bestEta = eta; best = i; }
+            }
+            if (best < 0) break;
+            chosenMask |= 1u << best;
+        }
+        int chosenCount = 0;
+        for (int i = 0; i < simulation->vehicleCount; i++)
+            if (chosenMask & (1u << i)) chosenCount++;
+        if (CountAssignedUnits(simulation, call->incidentIndex) + chosenCount <
+            incident->requiredUnits) continue;
+
+        for (int i = 0; i < simulation->vehicleCount; i++)
+            if (chosenMask & (1u << i)) AssignVehicle(simulation, i, call->incidentIndex);
+        incident->status = INCIDENT_DISPATCHED;
+        call->dispatched = 1;
+        call->dispatchedAt = simulation->elapsedTime;
+        float eta = SimulationEstimateIncidentETA(simulation, call->incidentIndex);
+        const char *level = incident->severity >= 3 ? "High" :
+                            incident->severity == 2 ? "Medium" : "Low";
+        snprintf(call->decisionReason, sizeof(call->decisionReason),
+                 "%s-severity %s; sending %d units. ETA %.1fs in %s traffic.",
+                 level, incident->type == INCIDENT_FIRE ? "fire" :
+                 incident->type == INCIDENT_CRIME ? "crime" :
+                 incident->type == INCIDENT_ACCIDENT ? "road collision" : "medical call",
+                 incident->requiredUnits, eta, SimulationTrafficLevelName(simulation->trafficLevel));
+    }
+}
+
 
 
 static void DispatchAvailableUnits(Simulation *simulation)
@@ -882,6 +1153,7 @@ static void DispatchAvailableUnits(Simulation *simulation)
     for (int i = 0; i < simulation->incidentCount; i++) {
         Incident *in = &simulation->incidents[i];
         if (in->status == INCIDENT_RESOLVED || in->status == INCIDENT_FAILED) continue;
+        if (in->callIndex >= 0) continue; // Operator calls dispatch atomically through their call record.
         int insertAt = count;
         if (simulation->dispatchStrategy == DISPATCH_PRIORITY) {
             float priority = SimulationIncidentPriority(in);
@@ -944,9 +1216,11 @@ static void DispatchAvailableUnits(Simulation *simulation)
 int SimulationDispatchVehicles(Simulation *simulation, int incidentIndex,
                                unsigned int vehicleMask)
 {
-    if (!simulation || incidentIndex < 0 || incidentIndex >= simulation->incidentCount) return 0;
+    if (!simulation || incidentIndex < 0 || incidentIndex >= simulation->incidentCount ||
+        !vehicleMask) return 0;
     Incident *incident = &simulation->incidents[incidentIndex];
-    if (incident->status == INCIDENT_RESOLVED || incident->status == INCIDENT_FAILED) return 0;
+    if (incident->callIndex >= 0 || incident->status == INCIDENT_RESOLVED ||
+        incident->status == INCIDENT_FAILED) return 0;
 
     IncidentType service = SimulationServiceForIncident(incident->type);
     int remaining = incident->requiredUnits - CountAssignedUnits(simulation, incidentIndex);
@@ -955,11 +1229,7 @@ int SimulationDispatchVehicles(Simulation *simulation, int incidentIndex,
         if (!(vehicleMask & (1u << i))) continue;
         Vehicle *vehicle = &simulation->vehicles[i];
         if (!vehicle->available || vehicle->serviceType != service) continue;
-        vehicle->available = 0;
-        vehicle->assignedIncident = incidentIndex;
-        vehicle->arrived = 0;
-        BuildVehicleRoute(vehicle, incident->position);
-        simulation->dispatchedByType[service]++;
+        AssignVehicle(simulation, i, incidentIndex);
         assigned++;
         remaining--;
     }
@@ -990,6 +1260,8 @@ static void UpdateEscalation(Simulation *simulation, int i)
         in->severity = newSeverity;
 
         in->requiredUnits = GetRequiredUnits(in->type, in->severity);
+        if (in->callIndex >= 0 && in->callIndex < simulation->callCount)
+            simulation->calls[in->callIndex].severity = in->severity;
 
     }
 
@@ -1002,6 +1274,8 @@ void SimulationUpdate(Simulation *simulation, float deltaTime)
 {
 
     if (deltaTime <= 0.0f) return;
+
+    simulation->elapsedTime += deltaTime;
 
     UpdateCivilianTraffic(simulation, deltaTime);
 
@@ -1042,6 +1316,7 @@ void SimulationUpdate(Simulation *simulation, float deltaTime)
 
 
     DispatchAvailableUnits(simulation);
+    SimulationProcessOperator(simulation);
 
 
 
@@ -1143,6 +1418,7 @@ void SimulationUpdate(Simulation *simulation, float deltaTime)
 
 
     DispatchAvailableUnits(simulation);
+    SimulationProcessOperator(simulation);
 
 }
 

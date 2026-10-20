@@ -27,6 +27,9 @@ typedef struct {
     TrafficLevel trafficLevel;
     CivilianCar civilianCars[MAX_CIVILIAN_CARS];
     int civilianCount;
+    EmergencyCall calls[MAX_CALLS];
+    int callCount;
+    float elapsedTime;
 } Simulation;
 
 typedef struct {
@@ -42,6 +45,12 @@ typedef struct {
 
 void SimulationInit(Simulation *simulation);
 int SimulationCreateIncident(Simulation *simulation, IncidentType type, Vector2 position);
+int SimulationCreateCall(Simulation *simulation, Vector2 location, const char *report);
+int SimulationClassifyCall(Simulation *simulation, int callIndex,
+                           IncidentType type, int severity);
+int SimulationDispatchCallVehicles(Simulation *simulation, int callIndex,
+                                   unsigned int vehicleMask);
+void SimulationProcessOperator(Simulation *simulation);
 IncidentType SimulationServiceForIncident(IncidentType type);
 int GetRequiredUnits(IncidentType type, int severity);
 float SimulationIncidentPriority(const Incident *incident);
@@ -56,6 +65,8 @@ int SimulationCountUnresolved(const Simulation *simulation);
 int SimulationDispatchVehicles(Simulation *simulation, int incidentIndex,
                                unsigned int vehicleMask);
 float SimulationEstimateIncidentETA(const Simulation *simulation, int incidentIndex);
+float SimulationEstimateUnitETA(const Simulation *simulation, int vehicleIndex,
+                                int incidentIndex);
 void SimulationSetTrafficLevel(Simulation *simulation, TrafficLevel level);
 const char *SimulationTrafficLevelName(TrafficLevel level);
 void SimulationRunStrategyComparison(StrategyComparison *comparison);
