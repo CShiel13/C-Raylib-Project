@@ -6,11 +6,13 @@
 #define MAX_INCIDENTS 100
 #define MAX_VEHICLES 9
 #define SERVICE_COUNT 3
-#define MAX_ROUTE_POINTS 16
+#define MAX_CALLS 100
+#define CALL_REPORT_LENGTH 128
+#define CALL_REASON_LENGTH 192
+#define MAX_SIMULATION_EVENTS 32
+#define SIMULATION_EVENT_LENGTH 128
 #define MAX_CIVILIAN_CARS 24
-#define MAX_CALLS MAX_INCIDENTS
-#define CALL_REPORT_LENGTH 96
-#define CALL_REASON_LENGTH 128
+#define MAX_ROUTE_POINTS 16
 
 typedef enum {
     INCIDENT_FIRE = 0,
@@ -34,19 +36,12 @@ typedef enum {
     TRAFFIC_LEVEL_COUNT
 } TrafficLevel;
 
-typedef struct {
-    Vector2 location;
-    float receivedAt;
-    float classifiedAt;
-    float dispatchedAt;
-    char report[CALL_REPORT_LENGTH];
-    char decisionReason[CALL_REASON_LENGTH];
-    IncidentType classifiedType;
-    int severity;
-    int classified;
-    int dispatched;
-    int incidentIndex;
-} EmergencyCall;
+typedef enum {
+    CITY_CLEAR = 0,
+    CITY_RAIN,
+    CITY_FOG,
+    CITY_CONDITION_COUNT
+} CityCondition;
 
 typedef struct {
     IncidentType type;
@@ -76,22 +71,52 @@ typedef struct {
     Vector2 route[MAX_ROUTE_POINTS];
     int routeCount;
     int routeIndex;
+    int trafficDelayLogged;
 } Vehicle;
 
 typedef struct {
     Vector2 position;
+    float speed;
+    float currentSpeed;
+    float progress;
+    float headingDegrees;
+    float sirenReactionDelay;
+    float sirenReactionTimer;
+    float yieldTime;
     int fromNode;
     int toNode;
-    float progress;
-    float speed;             // Preferred free-flow speed, varied deterministically
-    float currentSpeed;
-    float yieldTime;
-    float sirenReactionDelay;  // Stable per-driver response delay
-    float sirenReactionTimer;  // Countdown while an emergency vehicle approaches
-    int sirenSource;           // Emergency unit this driver is yielding to
-    int routeCursor;
     int laneIndex;
-    float headingDegrees;
+    int sirenSource;
+    int routeCursor;
 } CivilianCar;
+
+typedef struct {
+    Vector2 location;
+    float receivedAt;
+    float classifiedAt;
+    float dispatchedAt;
+    IncidentType trueType;
+    int trueSeverity;
+    IncidentType classifiedType;
+    int severity;
+    int classified;
+    int dispatched;
+    int overridePending;
+    int operatorOverride;
+    IncidentType operatorChoiceType;
+    int operatorWrongService;
+    int mismatchRecorded;
+    int feedbackReady;
+    int feedbackShown;
+    int callerSatisfied;
+    int incidentIndex;
+    char report[CALL_REPORT_LENGTH];
+    char decisionReason[CALL_REASON_LENGTH];
+} EmergencyCall;
+
+typedef struct {
+    float time;
+    char message[SIMULATION_EVENT_LENGTH];
+} SimulationEvent;
 
 #endif

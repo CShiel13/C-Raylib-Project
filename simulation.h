@@ -25,11 +25,14 @@ typedef struct {
     DispatchStrategy dispatchStrategy;
     DispatchMode dispatchMode;
     TrafficLevel trafficLevel;
+    CityCondition cityCondition;
     CivilianCar civilianCars[MAX_CIVILIAN_CARS];
     int civilianCount;
     EmergencyCall calls[MAX_CALLS];
     int callCount;
     float elapsedTime;
+    SimulationEvent events[MAX_SIMULATION_EVENTS];
+    int eventCount;
 } Simulation;
 
 typedef struct {
@@ -46,6 +49,10 @@ typedef struct {
 void SimulationInit(Simulation *simulation);
 int SimulationCreateIncident(Simulation *simulation, IncidentType type, Vector2 position);
 int SimulationCreateCall(Simulation *simulation, Vector2 location, const char *report);
+int SimulationSetCallTruth(Simulation *simulation, int callIndex,
+                           IncidentType trueType, int trueSeverity);
+int SimulationSuggestCallClassification(const Simulation *simulation, int callIndex,
+                                        IncidentType *type, int *severity);
 int SimulationClassifyCall(Simulation *simulation, int callIndex,
                            IncidentType type, int severity);
 int SimulationDispatchCallVehicles(Simulation *simulation, int callIndex,
@@ -69,6 +76,8 @@ float SimulationEstimateUnitETA(const Simulation *simulation, int vehicleIndex,
                                 int incidentIndex);
 void SimulationSetTrafficLevel(Simulation *simulation, TrafficLevel level);
 const char *SimulationTrafficLevelName(TrafficLevel level);
+void SimulationSetCityCondition(Simulation *simulation, CityCondition condition);
+const char *SimulationCityConditionName(CityCondition condition);
 void SimulationRunStrategyComparison(StrategyComparison *comparison);
 
 #endif

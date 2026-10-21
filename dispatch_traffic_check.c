@@ -1,4 +1,4 @@
-#include "../outputs/simulation.h"
+#include "simulation.h"
 
 #include <assert.h>
 #include <math.h>

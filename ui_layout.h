@@ -3,7 +3,7 @@
 
 #include "raylib.h"
 
-// Fit a fixed virtual UI canvas inside a resizable window without distortion.
+// Fit the virtual Control Room canvas inside a resizable window without distortion.
 static Rectangle FitVirtualViewport(int screenWidth, int screenHeight,
                                     int canvasWidth, int canvasHeight)
 {
@@ -18,7 +18,7 @@ static Rectangle FitVirtualViewport(int screenWidth, int screenHeight,
                        (screenHeight - height) * 0.5f, width, height};
 }
 
-// Convert actual window coordinates back to the virtual canvas used for drawing.
+// Convert window pointer coordinates into the virtual UI coordinate system.
 static int ScreenToVirtualPoint(Vector2 screenPoint, Rectangle viewport,
                                 int canvasWidth, int canvasHeight, Vector2 *virtualPoint)
 {

@@ -60,6 +60,142 @@ static const Rectangle modalPanel = {470, 210, 660, 490};
 static const Rectangle modalCloseButton = {1000, 638, 100, 38};
 static const Rectangle routesToggleButton = {550, 340, 500, 48};
 static const Rectangle civilianToggleButton = {550, 405, 500, 48};
+static const Rectangle cityConditionButton = {550, 470, 500, 48};
+static const Rectangle operatorModalPanel = {430, 175, 740, 550};
+static const Rectangle operatorFireButton = {470, 625, 210, 54};
+static const Rectangle operatorPoliceButton = {695, 625, 210, 54};
+static const Rectangle operatorAmbulanceButton = {920, 625, 210, 54};
+
+static int IsIncidentFinished(const Incident *incident);
+static int DrawWrappedText(const char *text, int x, int y, int fontSize,
+                           int maxCharacters, int lineHeight, Color color);
+static const char *PriorityLabel(int severity);
+static void DrawButton(Rectangle rect, const char *label, Color color);
+static void DrawPanel(Rectangle rect);
+
+static int FindPendingOverrideCall(const Simulation *simulation)
+{
+    if (!simulation || simulation->dispatchMode != DISPATCH_AUTOMATIC) return -1;
+    for (int i = 0; i < simulation->callCount; i++) {
+        const EmergencyCall *call = &simulation->calls[i];
+        if (call->overridePending && !call->classified && !call->dispatched) return i;
+    }
+    return -1;
+}
+
+static void StartPendingOverrideModal(const Simulation *simulation, bool *paused,
+                                     bool *resumeWhenDone, int *modalCall,
+                                     double *modalDeadline)
+{
+    if (!simulation || !paused || !resumeWhenDone || !modalCall || !modalDeadline ||
+        *modalCall >= 0) return;
+    int next = FindPendingOverrideCall(simulation);
+    if (next < 0) return;
+    *resumeWhenDone = !*paused;
+    *paused = true;
+    *modalCall = next;
+    *modalDeadline = GetTime() + 12.0;
+}
+
+static IncidentType OperatorServiceChoice(int choice, IncidentType aiType)
+{
+    if (choice == 0) return INCIDENT_FIRE;
+    if (choice == 1) return INCIDENT_CRIME;
+    if (choice == 2)
+        return aiType == INCIDENT_ACCIDENT || aiType == INCIDENT_MEDICAL ?
+               aiType : INCIDENT_MEDICAL;
+    return aiType;
+}
+
+static void AcceptOperatorOverride(Simulation *simulation, int callIndex,
+                                   IncidentType acceptedType, int severity,
+                                   bool *paused, bool resumeWhenDone,
+                                   int *modalCall, double *modalDeadline)
+{
+    if (!simulation || callIndex < 0 || callIndex >= simulation->callCount) return;
+    EmergencyCall *call = &simulation->calls[callIndex];
+    call->overridePending = 0;
+    call->operatorOverride = 1;
+    call->operatorChoiceType = acceptedType;
+    call->operatorWrongService =
+        SimulationServiceForIncident(call->trueType) !=
+        SimulationServiceForIncident(acceptedType);
+    int classified = SimulationClassifyCall(simulation, callIndex, acceptedType, severity);
+    if (classified) SimulationProcessOperator(simulation);
+    if (modalCall) *modalCall = -1;
+    if (modalDeadline) *modalDeadline = 0.0;
+    if (paused) *paused = !resumeWhenDone;
+    StartPendingOverrideModal(simulation, paused, &resumeWhenDone, modalCall, modalDeadline);
+}
+
+static void UpdateCallerFeedbackToast(Simulation *simulation, char *notice,
+                                      size_t noticeSize, int *noticeMatched,
+                                      double *noticeUntil)
+{
+    if (!simulation || !notice || !noticeMatched || !noticeUntil) return;
+    for (int i = 0; i < simulation->callCount; i++) {
+        EmergencyCall *call = &simulation->calls[i];
+        if (!call->feedbackReady || call->feedbackShown) continue;
+        call->feedbackShown = 1;
+        *noticeMatched = call->callerSatisfied;
+        snprintf(notice, noticeSize, "CALLER %s  |  CALL #%02d %s.",
+                 call->callerSatisfied ? "SATISFIED" : "DISSATISFIED", i + 1,
+                 call->incidentIndex >= 0 && call->incidentIndex < simulation->incidentCount &&
+                 simulation->incidents[call->incidentIndex].status == INCIDENT_RESOLVED ?
+                 "RESOLVED" : "FAILED");
+        *noticeUntil = GetTime() + 3.5;
+        break;
+    }
+}
+
+static void DrawOperatorOverrideModal(const Simulation *simulation, int callIndex,
+                                      double deadline)
+{
+    if (!simulation || callIndex < 0 || callIndex >= simulation->callCount) return;
+    const EmergencyCall *call = &simulation->calls[callIndex];
+    IncidentType suggestedType;
+    int suggestedSeverity;
+    if (!SimulationSuggestCallClassification(simulation, callIndex,
+                                               &suggestedType, &suggestedSeverity)) return;
+    DrawRectangle(0, 0, UI_WIDTH, UI_HEIGHT, (Color){0, 0, 0, 205});
+    DrawPanel(operatorModalPanel);
+    DrawRectangleRounded((Rectangle){450, 192, 700, 58}, 0.12f, 8,
+                         (Color){13, 48, 69, 255});
+    DrawText("INCOMING CALL", 475, 207, 24, RAYWHITE);
+    double remaining = deadline - GetTime();
+    if (remaining < 0.0) remaining = 0.0;
+    int seconds = (int)ceil(remaining);
+    Color urgency = seconds <= 3 ? (Color){255, 77, 84, 255} :
+                    seconds <= 6 ? (Color){255, 178, 63, 255} :
+                    (Color){104, 208, 245, 255};
+    DrawRectangleRounded((Rectangle){953, 198, 167, 46}, 0.18f, 7,
+                         (Color){23, 35, 48, 255});
+    DrawText(TextFormat("TIME  %02d", seconds), 974, 210, 20, urgency);
+
+    DrawText(TextFormat("CALL #%02d  |  RECEIVED %.1f  |  LOCATION %.0f, %.0f",
+                        callIndex + 1, call->receivedAt,
+                        call->location.x, call->location.y), 480, 272, 13,
+             (Color){143, 207, 232, 255});
+    DrawText("CALLER REPORT", 480, 310, 12, (Color){119, 192, 224, 255});
+    DrawRectangleRounded((Rectangle){470, 330, 660, 105}, 0.08f, 6,
+                         (Color){8, 25, 39, 255});
+    DrawWrappedText(call->report, 490, 348, 17, 68, 24, RAYWHITE);
+    DrawText("AI OPERATOR SUGGESTION", 480, 458, 12,
+             (Color){119, 192, 224, 255});
+    const char *typeName = suggestedType == INCIDENT_FIRE ? "FIRE" :
+                           suggestedType == INCIDENT_CRIME ? "POLICE" :
+                           suggestedType == INCIDENT_ACCIDENT ? "TRAFFIC ACCIDENT" : "MEDICAL";
+    DrawText(TextFormat("%s  |  %s PRIORITY  |  %d UNIT%s REQUIRED",
+                        typeName, PriorityLabel(suggestedSeverity),
+                        GetRequiredUnits(suggestedType, suggestedSeverity),
+                        GetRequiredUnits(suggestedType, suggestedSeverity) == 1 ? "" : "S"),
+             480, 481, 17, RAYWHITE);
+    DrawText("Choose a service. If time expires, AUTO OP applies its suggestion.",
+             480, 525, 12, (Color){164, 186, 198, 255});
+    DrawButton(operatorFireButton, "FIRE", (Color){157, 52, 59, 255});
+    DrawButton(operatorPoliceButton, "POLICE", (Color){33, 104, 164, 255});
+    DrawButton(operatorAmbulanceButton, "AMBULANCE", (Color){25, 132, 105, 255});
+}
 
 // Draw recognizable vector symbols without depending on platform emoji fonts.
 static void DrawIncidentIcon(IncidentType type, Vector2 center, float size, Color color)
@@ -122,6 +258,93 @@ static void DrawIncidentIcon(IncidentType type, Vector2 center, float size, Colo
         default:
             DrawCircleV(center, size, color);
             break;
+    }
+}
+
+static void DrawActiveIncidentEffect(const Incident *incident, int index, float time)
+{
+    if (IsIncidentFinished(incident)) return;
+    float phase = time * 5.0f + (float)index * 1.71f;
+    float pulse = 0.5f + 0.5f * sinf(phase);
+    if (incident->type == INCIDENT_FIRE) {
+        for (int puff = 0; puff < 3; puff++) {
+            float rise = fmodf(time * 24.0f + index * 13.0f + puff * 19.0f, 42.0f);
+            float drift = sinf(phase + (float)puff * 1.8f) * 5.0f;
+            DrawCircleV((Vector2){incident->position.x - 5.0f + drift,
+                                  incident->position.y - 24.0f - rise},
+                        3.5f + (float)puff, Fade((Color){171, 182, 185, 255},
+                                                 0.30f * (1.0f - rise / 42.0f)));
+        }
+        float flameHeight = 10.0f + pulse * 7.0f;
+        DrawTriangle((Vector2){incident->position.x, incident->position.y + 19.0f - flameHeight},
+                     (Vector2){incident->position.x - 7.0f, incident->position.y + 17.0f},
+                     (Vector2){incident->position.x + 7.0f, incident->position.y + 17.0f},
+                     Fade(ORANGE, 0.85f));
+        DrawTriangle((Vector2){incident->position.x, incident->position.y + 18.0f - flameHeight * 0.62f},
+                     (Vector2){incident->position.x - 3.5f, incident->position.y + 16.0f},
+                     (Vector2){incident->position.x + 3.5f, incident->position.y + 16.0f},
+                     Fade((Color){255, 226, 132, 255}, 0.9f));
+    } else if (incident->type == INCIDENT_ACCIDENT) {
+        DrawCircleLines((int)incident->position.x, (int)incident->position.y,
+                        14.0f + pulse * 5.0f, Fade(ORANGE, 0.55f));
+        Vector2 warning = {incident->position.x + 16.0f, incident->position.y - 12.0f};
+        DrawTriangle((Vector2){warning.x, warning.y - 8.0f},
+                     (Vector2){warning.x - 7.0f, warning.y + 6.0f},
+                     (Vector2){warning.x + 7.0f, warning.y + 6.0f}, ORANGE);
+        DrawText("!", (int)warning.x - 2, (int)warning.y - 4, 9, (Color){31, 36, 39, 255});
+    } else if (incident->type == INCIDENT_MEDICAL) {
+        DrawCircleLines((int)incident->position.x, (int)incident->position.y,
+                        13.0f + pulse * 8.0f,
+                        Fade((Color){88, 235, 190, 255}, 0.35f + pulse * 0.4f));
+    }
+}
+
+static void DrawCityWeather(const Simulation *simulation)
+{
+    if (simulation->cityCondition == CITY_CLEAR) return;
+    if (simulation->cityCondition == CITY_FOG) {
+        DrawRectangle(0, 0, CITY_WIDTH, CITY_HEIGHT, (Color){196, 211, 218, 34});
+        for (int band = 0; band < 4; band++) {
+            float y = 90.0f + band * 157.0f + sinf(simulation->elapsedTime * 0.35f + band) * 12.0f;
+            DrawRectangle(0, (int)y, CITY_WIDTH, 48, (Color){201, 216, 221, 16});
+        }
+        return;
+    }
+    for (int drop = 0; drop < 82; drop++) {
+        float x = (float)((drop * 97 + 29) % CITY_WIDTH);
+        float y = fmodf((float)((drop * 53) % CITY_HEIGHT) + simulation->elapsedTime * 92.0f,
+                        (float)CITY_HEIGHT);
+        DrawLineEx((Vector2){x, y}, (Vector2){x - 5.0f, y + 10.0f}, 1.1f,
+                   (Color){127, 190, 225, 105});
+    }
+}
+
+static void DrawEventFeed(const Simulation *simulation)
+{
+    Rectangle feedPanel = {1258, 515, 308, 278};
+    DrawRectangleRounded(feedPanel, 0.035f, 8, (Color){11, 29, 43, 245});
+    DrawRectangleRoundedLinesEx(feedPanel, 0.035f, 8, 1, (Color){35, 69, 89, 255});
+    DrawText("LIVE EVENT FEED", 1270, 527, 12, (Color){107, 190, 238, 255});
+    DrawText(TextFormat("%d / %d", simulation->eventCount, MAX_SIMULATION_EVENTS),
+             1500, 529, 8, (Color){135, 161, 178, 255});
+    DrawLine(1270, 546, 1554, 546, (Color){43, 67, 83, 255});
+    if (simulation->eventCount == 0) {
+        DrawText("Waiting for simulation events", 1270, 560, 9,
+                 (Color){145, 166, 180, 255});
+        return;
+    }
+    int shown = simulation->eventCount < 5 ? simulation->eventCount : 5;
+    for (int row = 0; row < shown; row++) {
+        int eventIndex = simulation->eventCount - 1 - row;
+        const SimulationEvent *event = &simulation->events[eventIndex];
+        int y = 553 + row * 46;
+        DrawCircle(1274, y + 8, 3, row == 0 ? SKYBLUE : (Color){86, 126, 148, 255});
+        DrawText(TextFormat("T+%.1fs", event->time), 1283, y + 3, 8,
+                 (Color){128, 163, 183, 255});
+        DrawWrappedText(event->message, 1283, y + 15, 8, 52, 10,
+                        (Color){205, 218, 226, 255});
+        if (row + 1 < shown) DrawLine(1283, y + 42, 1554, y + 42,
+                                      (Color){27, 49, 63, 255});
     }
 }
 
@@ -916,6 +1139,10 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedCall,
             DrawText(TextFormat("First arrival: %s", incident->responseRecorded ?
                      TextFormat("%.1fs after call", incident->responseTime) : "pending"),
                      1260, 471, 8, (Color){155, 185, 202, 255});
+            if (call->feedbackReady)
+                DrawText(call->callerSatisfied ? "CALLER FEEDBACK: SATISFIED" :
+                         "CALLER FEEDBACK: DISSATISFIED", 1260, 485, 10,
+                         call->callerSatisfied ? GREEN : (Color){255, 105, 110, 255});
         } else if (simulation->dispatchMode == DISPATCH_AUTOMATIC) {
             DrawText("AUTO OPERATOR IS CLASSIFYING THIS REPORT", 1260, 268, 9, SKYBLUE);
             DrawWrappedText(call->decisionReason, 1260, 288, 9, 55, 12,
@@ -984,6 +1211,7 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
                      (int)(mapClip.height * UI_RENDER_SCALE));
     BeginMode2D(mapCamera);
     DrawCity();
+    DrawCityWeather(simulation);
     if (showCivilianTraffic)
         for (int i = 0; i < simulation->civilianCount; i++)
             DrawCivilianCar(&simulation->civilianCars[i]);
@@ -1007,6 +1235,7 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
 
     for (int i = 0; i < simulation->incidentCount; i++) {
         const Incident *incident = &simulation->incidents[i];
+        DrawActiveIncidentEffect(incident, i, simulation->elapsedTime);
         Color color = incident->status == INCIDENT_RESOLVED ? GREEN :
                       incident->status == INCIDENT_FAILED ? GRAY :
                       incident->severity >= 3 ? RED :
@@ -1016,6 +1245,17 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
         DrawCircleV(incident->position, radius, Fade(color, 0.32f));
         DrawCircleLines((int)incident->position.x, (int)incident->position.y, radius, color);
         DrawIncidentIcon(incident->type, incident->position, radius * 0.58f, color);
+        if (incident->status == INCIDENT_RESOLVED) {
+            DrawLineEx((Vector2){incident->position.x - 4, incident->position.y + 1},
+                       (Vector2){incident->position.x - 1, incident->position.y + 4}, 2, GREEN);
+            DrawLineEx((Vector2){incident->position.x - 1, incident->position.y + 4},
+                       (Vector2){incident->position.x + 5, incident->position.y - 4}, 2, GREEN);
+        } else if (incident->status == INCIDENT_FAILED) {
+            DrawLineEx((Vector2){incident->position.x - 4, incident->position.y - 4},
+                       (Vector2){incident->position.x + 4, incident->position.y + 4}, 2, GRAY);
+            DrawLineEx((Vector2){incident->position.x - 4, incident->position.y + 4},
+                       (Vector2){incident->position.x + 4, incident->position.y - 4}, 2, GRAY);
+        }
         if (i == selectedIncident)
             DrawCircleLines((int)incident->position.x, (int)incident->position.y,
                             radius + 6.0f, GOLD);
@@ -1107,14 +1347,19 @@ static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
     DrawButton(civilianToggleButton,
                showCivilianTraffic ? "CIVILIAN TRAFFIC  ON" : "CIVILIAN TRAFFIC  OFF",
                showCivilianTraffic ? (Color){31, 92, 132, 255} : DARKGRAY);
-    DrawText(TextFormat("Dispatch mode: %s", simulation->dispatchMode == DISPATCH_AUTOMATIC ?
-             "Automatic" : "Manual"), 550, 480, 13, RAYWHITE);
-    DrawText(TextFormat("Traffic level: %s", SimulationTrafficLevelName(simulation->trafficLevel)),
-             550, 506, 13, RAYWHITE);
-    DrawText("Keyboard: 1-4 incident | Space pause | S slow | F fast | N step",
-             550, 550, 11, (Color){154, 181, 198, 255});
-    DrawText("T traffic | M simulate queue | C compare | R reset | Esc close",
-             550, 571, 11, (Color){154, 181, 198, 255});
+    DrawButton(cityConditionButton,
+               TextFormat("CITY CONDITIONS: %s  (CLICK TO CHANGE)",
+                          SimulationCityConditionName(simulation->cityCondition)),
+               (Color){31, 92, 132, 255});
+    DrawText("Visual weather only; roads and ETA rules are unchanged.",
+             550, 523, 10, (Color){154, 181, 198, 255});
+    DrawText(TextFormat("Dispatch: %s  |  Traffic: %s",
+             simulation->dispatchMode == DISPATCH_AUTOMATIC ? "Automatic" : "Manual",
+             SimulationTrafficLevelName(simulation->trafficLevel)), 550, 544, 12, RAYWHITE);
+    DrawText("Keys: 1-4 reports | Space pause | S slow | F fast | N step",
+             550, 572, 10, (Color){154, 181, 198, 255});
+    DrawText("T traffic | W weather | M queue | C compare | R reset | Esc close",
+             550, 590, 10, (Color){154, 181, 198, 255});
     DrawButton(modalCloseButton, "CLOSE", BLUE);
 }
 
@@ -1161,6 +1406,12 @@ int main(void)
     int manualCallSeverity = 1;
     unsigned int selectedVehicleMask = 0;
     StrategyComparison comparison = {0};
+    int overrideModalCall = -1;
+    bool overrideResumeWhenDone = false;
+    double overrideModalDeadline = 0.0;
+    char operatorNotice[CALL_REASON_LENGTH] = "";
+    int operatorNoticeMatched = 0;
+    double operatorNoticeUntil = 0.0;
 
 
 
@@ -1174,6 +1425,25 @@ int main(void)
         Rectangle viewport = FitVirtualViewport(screenWidth, screenHeight,
                                                 UI_WIDTH, UI_HEIGHT);
 
+        bool modalWasActive = overrideModalCall >= 0;
+        int modalCallAtFrameStart = overrideModalCall;
+        if (overrideModalCall >= 0 && GetTime() >= overrideModalDeadline) {
+            IncidentType aiType;
+            int aiSeverity;
+            if (SimulationSuggestCallClassification(&simulation, overrideModalCall,
+                                                   &aiType, &aiSeverity))
+                AcceptOperatorOverride(&simulation, overrideModalCall, aiType, aiSeverity,
+                                       &paused, overrideResumeWhenDone, &overrideModalCall,
+                                       &overrideModalDeadline);
+            else {
+                simulation.calls[overrideModalCall].overridePending = 0;
+                overrideModalCall = -1;
+                paused = !overrideResumeWhenDone;
+            }
+        }
+
+        bool stepRequested = false;
+        if (!modalWasActive && overrideModalCall < 0) {
         if (IsKeyPressed(KEY_ONE)) selectedType = INCIDENT_FIRE;
 
         if (IsKeyPressed(KEY_TWO)) selectedType = INCIDENT_CRIME;
@@ -1194,10 +1464,13 @@ int main(void)
             if (fastForward) slowMotion = false;
         }
 
-        bool stepRequested = IsKeyPressed(KEY_N);
+        stepRequested = IsKeyPressed(KEY_N);
         if (IsKeyPressed(KEY_T))
             SimulationSetTrafficLevel(&simulation,
                 (TrafficLevel)((simulation.trafficLevel + 1) % TRAFFIC_LEVEL_COUNT));
+        if (IsKeyPressed(KEY_W))
+            SimulationSetCityCondition(&simulation,
+                (CityCondition)((simulation.cityCondition + 1) % CITY_CONDITION_COUNT));
 
         if (IsKeyPressed(KEY_M)) SimulationSimulateQueue(&simulation);
         if (IsKeyPressed(KEY_C)) {
@@ -1219,6 +1492,7 @@ int main(void)
             selectedVehicleMask = 0;
             overlay = OVERLAY_NONE;
         }
+        }
 
 
 
@@ -1233,7 +1507,24 @@ int main(void)
 
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mouseInCanvas) {
 
-            if (overlay != OVERLAY_NONE) {
+            if (modalWasActive || overrideModalCall >= 0) {
+                if (overrideModalCall >= 0 && modalCallAtFrameStart == overrideModalCall) {
+                    int choice = CheckCollisionPointRec(mouse, operatorFireButton) ? 0 :
+                                 CheckCollisionPointRec(mouse, operatorPoliceButton) ? 1 :
+                                 CheckCollisionPointRec(mouse, operatorAmbulanceButton) ? 2 : -1;
+                    if (choice >= 0) {
+                        IncidentType aiType;
+                        int aiSeverity;
+                        if (SimulationSuggestCallClassification(&simulation,
+                                overrideModalCall, &aiType, &aiSeverity)) {
+                            IncidentType acceptedType = OperatorServiceChoice(choice, aiType);
+                            AcceptOperatorOverride(&simulation, overrideModalCall,
+                                acceptedType, aiSeverity, &paused, overrideResumeWhenDone,
+                                &overrideModalCall, &overrideModalDeadline);
+                        }
+                    }
+                }
+            } else if (overlay != OVERLAY_NONE) {
                 if (CheckCollisionPointRec(mouse, modalCloseButton)) {
                     overlay = OVERLAY_NONE;
                 } else if (overlay == OVERLAY_SETTINGS &&
@@ -1242,6 +1533,10 @@ int main(void)
                 } else if (overlay == OVERLAY_SETTINGS &&
                            CheckCollisionPointRec(mouse, civilianToggleButton)) {
                     showCivilianTraffic = !showCivilianTraffic;
+                } else if (overlay == OVERLAY_SETTINGS &&
+                           CheckCollisionPointRec(mouse, cityConditionButton)) {
+                    SimulationSetCityCondition(&simulation,
+                        (CityCondition)((simulation.cityCondition + 1) % CITY_CONDITION_COUNT));
                 }
             } else if (CheckCollisionPointRec(mouse, compareButton)) {
 
@@ -1256,7 +1551,16 @@ int main(void)
                 simulation.dispatchMode = simulation.dispatchMode == DISPATCH_AUTOMATIC ?
                                           DISPATCH_MANUAL : DISPATCH_AUTOMATIC;
                 selectedVehicleMask = 0;
-                SimulationProcessOperator(&simulation);
+                if (simulation.dispatchMode == DISPATCH_AUTOMATIC) {
+                    for (int i = 0; i < simulation.callCount; i++)
+                        if (!simulation.calls[i].classified && !simulation.calls[i].dispatched)
+                            simulation.calls[i].overridePending = 1;
+                    StartPendingOverrideModal(&simulation, &paused, &overrideResumeWhenDone,
+                                              &overrideModalCall, &overrideModalDeadline);
+                } else {
+                    for (int i = 0; i < simulation.callCount; i++)
+                        simulation.calls[i].overridePending = 0;
+                }
 
             } else if (CheckCollisionPointRec(mouse, manualClassifyButton) &&
                        simulation.dispatchMode == DISPATCH_MANUAL && selectedCall >= 0 &&
@@ -1411,9 +1715,23 @@ int main(void)
                     if (SimulationCreateCall(&simulation, cityPoint,
                             CallerReportForType((IncidentType)selectedType, simulation.callCount))) {
                         selectedCall = simulation.callCount - 1;
+                        IncidentType reportType = (IncidentType)selectedType;
+                        int reportSeverity = 1;
+                        SimulationSuggestCallClassification(&simulation, selectedCall,
+                                                            &reportType, &reportSeverity);
+                        if (reportType != (IncidentType)selectedType) reportSeverity = 1;
+                        SimulationSetCallTruth(&simulation, selectedCall,
+                                               (IncidentType)selectedType, reportSeverity);
                         manualCallType = (IncidentType)selectedType;
                         manualCallSeverity = 1;
-                        SimulationProcessOperator(&simulation);
+                        if (simulation.dispatchMode == DISPATCH_AUTOMATIC) {
+                            simulation.calls[selectedCall].overridePending = 1;
+                            StartPendingOverrideModal(&simulation, &paused,
+                                &overrideResumeWhenDone, &overrideModalCall,
+                                &overrideModalDeadline);
+                        } else {
+                            SimulationProcessOperator(&simulation);
+                        }
                     }
                 }
 
@@ -1423,7 +1741,9 @@ int main(void)
 
 
 
-        if (stepRequested) {
+        if (overrideModalCall >= 0 || modalWasActive) {
+            // Modal countdowns use real time; simulation state is frozen here.
+        } else if (stepRequested) {
             // Manual stepping always advances by the same small time slice,
             // then pauses so the result can be inspected.
             paused = true;
@@ -1432,6 +1752,8 @@ int main(void)
             float speedMultiplier = fastForward ? 8.0f : slowMotion ? 0.25f : 1.0f;
             SimulationUpdate(&simulation, GetFrameTime() * speedMultiplier);
         }
+        UpdateCallerFeedbackToast(&simulation, operatorNotice, sizeof(operatorNotice),
+                                  &operatorNoticeMatched, &operatorNoticeUntil);
 
 
 
@@ -1464,7 +1786,8 @@ int main(void)
         DrawHeaderService(&simulation, INCIDENT_ACCIDENT, 1135, "AMBULANCE", IncidentColor(INCIDENT_MEDICAL));
         DrawRectangleRounded((Rectangle){1300, 18, 272, 50}, 0.12f, 7,
                              (Color){17, 42, 60, 255});
-        DrawText(TextFormat("CIVILIAN CARS  %d", simulation.civilianCount),
+        DrawText(TextFormat("CARS %d  |  CITY %s", simulation.civilianCount,
+                 SimulationCityConditionName(simulation.cityCondition)),
                  1315, 25, 10, (Color){179, 198, 211, 255});
         DrawText(TextFormat("TRAFFIC  %s", SimulationTrafficLevelName(simulation.trafficLevel)),
                  1315, 43, 12, RAYWHITE);
@@ -1496,13 +1819,14 @@ int main(void)
         BeginMode2D(renderCamera);
         DrawIncidentDetails(&simulation, selectedCall, comparisonReady, &comparison,
                             selectedVehicleMask, manualCallType, manualCallSeverity);
+        DrawEventFeed(&simulation);
 
         DrawPanel((Rectangle){18, 818, 1564, 68});
         DrawText("SIMULATION CONTROLS", 34, 833, 13,
                  (Color){132, 194, 225, 255});
         DrawText("1-4 caller report | SPACE pause | S slow | F fast | N step",
                  34, 853, 9, (Color){158, 180, 193, 255});
-        DrawText("T traffic | C compare | M simulate queue | R reset",
+        DrawText("T traffic | W weather | C compare | M queue | R reset",
                  34, 868, 9, (Color){158, 180, 193, 255});
         DrawButton(compareButton, "COMPARE", BLUE);
         DrawButton(pauseButton, paused ? "RESUME" : "PAUSE", paused ? DARKGREEN : DARKGRAY);
@@ -1541,6 +1865,16 @@ int main(void)
         if (overlay == OVERLAY_REPORTS) DrawReportsOverlay(&simulation);
         else if (overlay == OVERLAY_SETTINGS)
             DrawSettingsOverlay(showRoutes, showCivilianTraffic, &simulation);
+
+        if (overrideModalCall >= 0)
+            DrawOperatorOverrideModal(&simulation, overrideModalCall, overrideModalDeadline);
+        if (operatorNotice[0] && GetTime() < operatorNoticeUntil) {
+            Color noticeColor = operatorNoticeMatched ? (Color){24, 119, 83, 248} :
+                                (Color){145, 49, 57, 248};
+            DrawRectangleRounded((Rectangle){425, 96, 750, 38}, 0.18f, 8, noticeColor);
+            int noticeWidth = MeasureText(operatorNotice, 12);
+            DrawText(operatorNotice, 800 - noticeWidth / 2, 109, 12, RAYWHITE);
+        }
 
         EndMode2D();
         EndTextureMode();
