@@ -1,4 +1,4 @@
-#include "../outputs/simulation.h"
+#include "simulation.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -47,13 +47,16 @@ static void CheckOverrideServicePipeline(void)
     assert(call->mismatchRecorded);
     assert(sim.incidents[call->incidentIndex].type == INCIDENT_ACCIDENT);
     assert(call->dispatched);
-    assert(CountAssignedUnits(&sim, call->incidentIndex) == 2);
+    assert(CountAssignedUnits(&sim, call->incidentIndex) == 3);
     for (int i = 0; i < sim.vehicleCount; i++) {
         if (sim.vehicles[i].assignedIncident == call->incidentIndex)
-            assert(sim.vehicles[i].serviceType == INCIDENT_ACCIDENT);
+            assert(sim.vehicles[i].serviceType == INCIDENT_ACCIDENT ||
+                   sim.vehicles[i].serviceType == INCIDENT_CRIME);
         else if (sim.vehicles[i].serviceType == INCIDENT_FIRE)
             assert(sim.vehicles[i].available);
     }
+    assert(CountAssignedUnitsByService(&sim, call->incidentIndex, INCIDENT_ACCIDENT) == 2);
+    assert(CountAssignedUnitsByService(&sim, call->incidentIndex, INCIDENT_CRIME) == 1);
     assert(!call->feedbackReady); /* mismatch feedback waits for final outcome */
     for (int step = 0; step < 400 && !call->feedbackReady; step++)
         SimulationUpdate(&sim, 0.1f);
@@ -134,7 +137,8 @@ static void CheckMultiUnitAndUnavailableRetry(void)
     assert(SimulationClassifyCall(&sim, 0, INCIDENT_FIRE, 3));
     SimulationProcessOperator(&sim);
     assert(sim.calls[0].dispatched);
-    assert(CountAssignedUnits(&sim, sim.calls[0].incidentIndex) == 3);
+    assert(CountAssignedUnits(&sim, sim.calls[0].incidentIndex) == 5);
+    assert(CountAssignedUnitsByService(&sim, sim.calls[0].incidentIndex, INCIDENT_FIRE) == 3);
 
     assert(SimulationCreateCall(&sim, (Vector2){700, 420},
         "Smoke from a building fire."));

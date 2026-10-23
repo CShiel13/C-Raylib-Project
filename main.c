@@ -4,6 +4,7 @@
 
 #include "simulation.h"
 #include "ui_layout.h"
+#include "manual_selection.h"
 
 #include <stdio.h>
 #include <math.h>
@@ -47,8 +48,7 @@ static const Rectangle simulateButton = {1102, 830, 104, 44};
 static const Rectangle reportsButton = {1214, 830, 86, 44};
 static const Rectangle settingsButton = {1308, 830, 86, 44};
 static const Rectangle resetButton = {1482, 830, 88, 44};
-static const Rectangle dispatchSelectedButton = {1260, 412, 306, 28};
-static const Rectangle manualClassifyButton = {1260, 328, 306, 27};
+static const Rectangle dispatchSelectedButton = {1260, 474, 306, 28};
 static const Rectangle callTypeButtons[4] = {
     {1260, 244, 148, 23}, {1418, 244, 148, 23},
     {1260, 271, 148, 23}, {1418, 271, 148, 23}
@@ -65,6 +65,54 @@ static const Rectangle operatorModalPanel = {430, 175, 740, 550};
 static const Rectangle operatorFireButton = {470, 625, 210, 54};
 static const Rectangle operatorPoliceButton = {695, 625, 210, 54};
 static const Rectangle operatorAmbulanceButton = {920, 625, 210, 54};
+
+static Font uiFont;
+static int uiFontLoaded;
+
+static void DrawUiText(const char *text, int x, int y, int fontSize, Color color)
+{
+    if (uiFontLoaded)
+        DrawTextEx(uiFont, text, (Vector2){(float)x, (float)y},
+                   (float)fontSize, 0.0f, color);
+    else
+        DrawText(text, x, y, fontSize, color);
+}
+
+#define DrawText DrawUiText
+
+static int MeasureUiText(const char *text, int fontSize)
+{
+    if (uiFontLoaded)
+        return (int)ceilf(MeasureTextEx(uiFont, text, (float)fontSize, 0.0f).x);
+    return MeasureText(text, fontSize);
+}
+
+static void LoadUiFont(void)
+{
+    static const char *fontPaths[] = {
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/segoeui.ttf"
+    };
+    uiFont = GetFontDefault();
+    uiFontLoaded = 0;
+    for (int i = 0; i < (int)(sizeof(fontPaths) / sizeof(fontPaths[0])); i++) {
+        if (!FileExists(fontPaths[i])) continue;
+        Font candidate = LoadFontEx(fontPaths[i], 48, NULL, 0);
+        if (candidate.texture.id == 0) continue;
+        uiFont = candidate;
+        uiFontLoaded = 1;
+        SetTextureFilter(uiFont.texture, TEXTURE_FILTER_BILINEAR);
+        return;
+    }
+}
+
+static void UnloadUiFont(void)
+{
+    if (uiFontLoaded) UnloadFont(uiFont);
+    uiFontLoaded = 0;
+}
 
 static int IsIncidentFinished(const Incident *incident);
 static int DrawWrappedText(const char *text, int x, int y, int fontSize,
@@ -261,21 +309,29 @@ static void DrawIncidentIcon(IncidentType type, Vector2 center, float size, Colo
     }
 }
 
-static void DrawActiveIncidentEffect(const Incident *incident, int index, float time)
+static void DrawActiveIncidentEffect(const Incident *incident, int index, float time,
+                                     CityCondition condition)
 {
     if (IsIncidentFinished(incident)) return;
     float phase = time * 5.0f + (float)index * 1.71f;
     float pulse = 0.5f + 0.5f * sinf(phase);
     if (incident->type == INCIDENT_FIRE) {
-        for (int puff = 0; puff < 3; puff++) {
-            float rise = fmodf(time * 24.0f + index * 13.0f + puff * 19.0f, 42.0f);
-            float drift = sinf(phase + (float)puff * 1.8f) * 5.0f;
+        int smokeCount = incident->fireContained ? 1 : 2 + incident->severity;
+        float smokeHeight = incident->fireContained ? 26.0f : 42.0f;
+        for (int puff = 0; puff < smokeCount; puff++) {
+            float rise = fmodf(time * (incident->fireContained ? 12.0f : 24.0f) +
+                               index * 13.0f + puff * 19.0f, smokeHeight);
+            float wind = condition == CITY_WIND ? 16.0f : 0.0f;
+            float drift = sinf(phase + (float)puff * 1.8f) * 5.0f +
+                          wind * rise / smokeHeight;
             DrawCircleV((Vector2){incident->position.x - 5.0f + drift,
                                   incident->position.y - 24.0f - rise},
                         3.5f + (float)puff, Fade((Color){171, 182, 185, 255},
-                                                 0.30f * (1.0f - rise / 42.0f)));
+                            (incident->fireContained ? 0.13f : 0.30f) *
+                            (1.0f - rise / smokeHeight)));
         }
-        float flameHeight = 10.0f + pulse * 7.0f;
+        float flameScale = incident->fireContained ? 0.38f : 1.0f;
+        float flameHeight = (10.0f + pulse * 7.0f + incident->severity * 2.0f) * flameScale;
         DrawTriangle((Vector2){incident->position.x, incident->position.y + 19.0f - flameHeight},
                      (Vector2){incident->position.x - 7.0f, incident->position.y + 17.0f},
                      (Vector2){incident->position.x + 7.0f, incident->position.y + 17.0f},
@@ -301,50 +357,64 @@ static void DrawActiveIncidentEffect(const Incident *incident, int index, float 
 
 static void DrawCityWeather(const Simulation *simulation)
 {
-    if (simulation->cityCondition == CITY_CLEAR) return;
-    if (simulation->cityCondition == CITY_FOG) {
+    if (simulation->cityCondition == CITY_NIGHT) {
+        DrawRectangle(0, 0, CITY_WIDTH, CITY_HEIGHT, (Color){4, 10, 28, 82});
+        for (int i = 0; i < 15; i++) {
+            int x = 42 + (i * 71) % 1000;
+            int y = 120 + (i * 43) % 470;
+            DrawCircle(x, y, 2.0f, (Color){255, 220, 123, 150});
+        }
+    } else if (simulation->cityCondition == CITY_FOG) {
         DrawRectangle(0, 0, CITY_WIDTH, CITY_HEIGHT, (Color){196, 211, 218, 34});
         for (int band = 0; band < 4; band++) {
             float y = 90.0f + band * 157.0f + sinf(simulation->elapsedTime * 0.35f + band) * 12.0f;
             DrawRectangle(0, (int)y, CITY_WIDTH, 48, (Color){201, 216, 221, 16});
         }
-        return;
-    }
-    for (int drop = 0; drop < 82; drop++) {
-        float x = (float)((drop * 97 + 29) % CITY_WIDTH);
-        float y = fmodf((float)((drop * 53) % CITY_HEIGHT) + simulation->elapsedTime * 92.0f,
-                        (float)CITY_HEIGHT);
-        DrawLineEx((Vector2){x, y}, (Vector2){x - 5.0f, y + 10.0f}, 1.1f,
-                   (Color){127, 190, 225, 105});
+    } else if (simulation->cityCondition == CITY_RAIN) {
+        for (int drop = 0; drop < 82; drop++) {
+            float x = (float)((drop * 97 + 29) % CITY_WIDTH);
+            float y = fmodf((float)((drop * 53) % CITY_HEIGHT) + simulation->elapsedTime * 92.0f,
+                            (float)CITY_HEIGHT);
+            DrawLineEx((Vector2){x, y}, (Vector2){x - 5.0f, y + 10.0f}, 1.1f,
+                       (Color){127, 190, 225, 105});
+        }
+    } else if (simulation->cityCondition == CITY_WIND) {
+        for (int streak = 0; streak < 8; streak++) {
+            int y = 78 + streak * 67;
+            int x = (int)fmodf((float)(streak * 127) + simulation->elapsedTime * 30.0f,
+                               (float)CITY_WIDTH);
+            DrawLineEx((Vector2){(float)x, (float)y}, (Vector2){(float)x + 22.0f, (float)y - 2.0f},
+                       1.0f, (Color){141, 194, 220, 75});
+        }
     }
 }
 
 static void DrawEventFeed(const Simulation *simulation)
 {
-    Rectangle feedPanel = {1258, 515, 308, 278};
+    // Reserve a compact strip at the bottom of the right panel. The feed used
+    // to be drawn over service and city-operation summaries.
+    Rectangle feedPanel = {1254, 714, 316, 90};
     DrawRectangleRounded(feedPanel, 0.035f, 8, (Color){11, 29, 43, 245});
     DrawRectangleRoundedLinesEx(feedPanel, 0.035f, 8, 1, (Color){35, 69, 89, 255});
-    DrawText("LIVE EVENT FEED", 1270, 527, 12, (Color){107, 190, 238, 255});
+    DrawText("LIVE EVENT FEED", 1266, 719, 9, (Color){107, 190, 238, 255});
     DrawText(TextFormat("%d / %d", simulation->eventCount, MAX_SIMULATION_EVENTS),
-             1500, 529, 8, (Color){135, 161, 178, 255});
-    DrawLine(1270, 546, 1554, 546, (Color){43, 67, 83, 255});
+             1518, 721, 7, (Color){135, 161, 178, 255});
+    DrawLine(1266, 734, 1558, 734, (Color){43, 67, 83, 255});
     if (simulation->eventCount == 0) {
-        DrawText("Waiting for simulation events", 1270, 560, 9,
+        DrawText("Waiting for simulation events", 1266, 746, 8,
                  (Color){145, 166, 180, 255});
         return;
     }
-    int shown = simulation->eventCount < 5 ? simulation->eventCount : 5;
+    int shown = simulation->eventCount < 3 ? simulation->eventCount : 3;
     for (int row = 0; row < shown; row++) {
         int eventIndex = simulation->eventCount - 1 - row;
         const SimulationEvent *event = &simulation->events[eventIndex];
-        int y = 553 + row * 46;
-        DrawCircle(1274, y + 8, 3, row == 0 ? SKYBLUE : (Color){86, 126, 148, 255});
-        DrawText(TextFormat("T+%.1fs", event->time), 1283, y + 3, 8,
+        int y = 739 + row * 20;
+        DrawCircle(1270, y + 5, 2, row == 0 ? SKYBLUE : (Color){86, 126, 148, 255});
+        DrawText(TextFormat("%.0fs", event->time), 1277, y, 7,
                  (Color){128, 163, 183, 255});
-        DrawWrappedText(event->message, 1283, y + 15, 8, 52, 10,
-                        (Color){205, 218, 226, 255});
-        if (row + 1 < shown) DrawLine(1283, y + 42, 1554, y + 42,
-                                      (Color){27, 49, 63, 255});
+        DrawText(TextFormat("%.47s", event->message), 1304, y, 7,
+                 (Color){205, 218, 226, 255});
     }
 }
 
@@ -387,6 +457,32 @@ static void DrawCivilianCar(const CivilianCar *car)
     DrawRectanglePro((Rectangle){car->position.x - 3, car->position.y - 2, 6, 4},
                      (Vector2){3, 2}, car->headingDegrees,
                      (Color){205, 222, 230, 255});
+}
+
+static void DrawPedestrian(const Pedestrian *person, float time)
+{
+    float bob = sinf(time * 6.0f + person->position.x * 0.03f) * 1.2f;
+    Color shirt = person->state == PEDESTRIAN_EVACUATING ? (Color){247, 145, 75, 255} :
+                  person->state == PEDESTRIAN_BYSTANDING ? (Color){90, 204, 230, 255} :
+                  person->state == PEDESTRIAN_RESPECTING_CORDON ? (Color){112, 167, 242, 255} :
+                  person->state == PEDESTRIAN_YIELDING ? (Color){255, 216, 105, 255} :
+                  person->state == PEDESTRIAN_CROSSING ||
+                  person->state == PEDESTRIAN_WAITING_TO_CROSS ? (Color){229, 240, 241, 255} :
+                  (Color){177, 202, 211, 255};
+    float sidestep = person->state == PEDESTRIAN_YIELDING ?
+                     (person->sidewalk < 3 ? -3.5f : 3.5f) : 0.0f;
+    if (person->state != PEDESTRIAN_WALKING)
+        DrawCircleLines((int)person->position.x, (int)person->position.y,
+                        person->state == PEDESTRIAN_BYSTANDING ? 6.0f : 4.5f,
+                        Fade(shirt, 0.75f));
+    DrawCircle((int)person->position.x, (int)(person->position.y - 3 + bob), 2.2f,
+               (Color){220, 183, 148, 255});
+    DrawLineEx((Vector2){person->position.x + sidestep, person->position.y - 1 + bob},
+               (Vector2){person->position.x + sidestep, person->position.y + 4 + bob}, 2.2f, shirt);
+    DrawLineEx((Vector2){person->position.x + sidestep, person->position.y + 4 + bob},
+               (Vector2){person->position.x - 2 + sidestep, person->position.y + 7 + bob}, 1.2f, shirt);
+    DrawLineEx((Vector2){person->position.x + sidestep, person->position.y + 4 + bob},
+               (Vector2){person->position.x + 2 + sidestep, person->position.y + 7 + bob}, 1.2f, shirt);
 }
 
 
@@ -444,7 +540,45 @@ static void DrawCrosswalkVertical(int x, int y)
         DrawRectangle(x, y + stripe * 5, 66, 3, (Color){203, 212, 209, 175});
 }
 
-static void DrawCity(void)
+static void DrawServiceLandmark(Rectangle r, const char *label, Color color)
+{
+    DrawRectangleRounded(r, 0.08f, 5, (Color){23, 50, 62, 255});
+    DrawRectangleRoundedLinesEx(r, 0.08f, 5, 1.2f, color);
+    DrawRectangle((int)r.x + 7, (int)r.y + 7, 9, 8, color);
+    DrawRectangle((int)r.x + 21, (int)r.y + 7, 9, 8, color);
+    DrawText(label, (int)r.x + 4, (int)r.y + r.height - 11, 7, RAYWHITE);
+}
+
+static int CountOnSceneService(const Simulation *simulation, int incidentIndex,
+                              IncidentType serviceType)
+{
+    int count = 0;
+    for (int i = 0; i < simulation->vehicleCount; i++) {
+        const Vehicle *unit = &simulation->vehicles[i];
+        if (unit->assignedIncident == incidentIndex && unit->serviceType == serviceType &&
+            unit->arrived && unit->activity == UNIT_ON_SCENE) count++;
+    }
+    return count;
+}
+
+static int HasRequiredOnSceneService(const Simulation *simulation, int incidentIndex,
+                                     IncidentType serviceType)
+{
+    const Incident *incident = &simulation->incidents[incidentIndex];
+    int required = incident->requiredUnitsByService[serviceType];
+    return required > 0 && CountOnSceneService(simulation, incidentIndex, serviceType) >= required;
+}
+
+static void DrawResponderFigure(Vector2 p, Color color, const char *label)
+{
+    DrawCircle((int)p.x, (int)p.y - 4, 2.0f, (Color){237, 205, 174, 255});
+    DrawLineEx((Vector2){p.x, p.y - 2}, (Vector2){p.x, p.y + 3}, 2.3f, color);
+    DrawLineEx((Vector2){p.x, p.y}, (Vector2){p.x - 3, p.y + 2}, 1.4f, color);
+    DrawLineEx((Vector2){p.x, p.y}, (Vector2){p.x + 3, p.y + 2}, 1.4f, color);
+    DrawText(label, (int)p.x - 18, (int)p.y + 5, 6, color);
+}
+
+static void DrawCity(const Simulation *simulation)
 {
     DrawRectangle(0, 0, CITY_WIDTH, CITY_HEIGHT, (Color){34, 53, 61, 255});
 
@@ -467,7 +601,6 @@ static void DrawCity(void)
     DrawRectangleRounded((Rectangle){850, 470, 125, 100}, 0.08f, 6, (Color){36, 79, 64, 255});
     DrawLineEx((Vector2){862, 555}, (Vector2){958, 484}, 3, (Color){117, 133, 98, 255});
     DrawCityTree((Vector2){870, 493}); DrawCityTree((Vector2){943, 550});
-    DrawCityTree((Vector2){916, 488}); DrawCityTree((Vector2){884, 548});
 
     // Parking courts and low-rise blocks in each neighborhood quadrant.
     DrawRectangleRounded((Rectangle){160, 58, 155, 42}, 0.04f, 4, (Color){49, 64, 70, 255});
@@ -490,7 +623,32 @@ static void DrawCity(void)
         {839,394,91,63}, {944,393,99,101}, {840,483,87,83}, {948,516,95,69}
     };
     const int buildingCount = (int)(sizeof(buildings) / sizeof(buildings[0]));
-    for (int i = 0; i < buildingCount; i++) DrawCityBuilding(buildings[i], i);
+    for (int i = 0; i < buildingCount; i++) {
+        DrawCityBuilding(buildings[i], i);
+        if (simulation->apartmentFireDrill && i == 4) {
+            const Incident *fire = simulation->incidentCount ? &simulation->incidents[0] : NULL;
+            DrawText("APARTMENT BLOCK", (int)buildings[i].x + 7,
+                     (int)buildings[i].y + 5, 6, (Color){139, 196, 219, 255});
+            if (fire && fire->status == INCIDENT_RESOLVED) {
+                DrawRectangle((int)buildings[i].x + 5, (int)buildings[i].y + 5,
+                              (int)buildings[i].width - 10, (int)buildings[i].height - 10,
+                              (Color){22, 25, 28, 145});
+                DrawLineEx((Vector2){buildings[i].x + 22, buildings[i].y + 17},
+                           (Vector2){buildings[i].x + 46, buildings[i].y + 37}, 2,
+                           (Color){15, 20, 25, 230});
+                DrawText("DAMAGED", (int)buildings[i].x + 36,
+                         (int)buildings[i].y + 37, 7, (Color){230, 173, 110, 255});
+            }
+        }
+        if (simulation->apartmentFireDrill && i == 7 && simulation->incidentCount > 0 &&
+            simulation->incidents[0].fireSpreadOccurred) {
+            DrawRectangleLinesEx(buildings[i], 2.0f,
+                simulation->incidents[0].fireContained ? GREEN : ORANGE);
+            DrawText(simulation->incidents[0].fireContained ? "FIRE CONTAINED" : "THREATENED",
+                     (int)buildings[i].x + 8, (int)buildings[i].y + buildings[i].height - 14,
+                     7, simulation->incidents[0].fireContained ? GREEN : ORANGE);
+        }
+    }
 
     // Minor access roads and sidewalks sit beneath the connected main roads.
     DrawRectangle(0, 274, CITY_WIDTH, 16, (Color){87, 102, 105, 255});
@@ -538,6 +696,9 @@ static void DrawCity(void)
     DrawText("WEST END", 55, 645, 11, (Color){191, 207, 203, 235});
     DrawText("CENTRAL", 493, 645, 11, (Color){191, 207, 203, 235});
     DrawText("PARK DISTRICT", 845, 645, 11, (Color){191, 207, 203, 235});
+    DrawServiceLandmark((Rectangle){240, 242, 54, 32}, "FIRE HQ", RED);
+    DrawServiceLandmark((Rectangle){590, 590, 62, 32}, "POLICE", BLUE);
+    DrawServiceLandmark((Rectangle){860, 490, 80, 58}, "HOSPITAL", (Color){91, 225, 182, 255});
 }
 
 static const char *IncidentTypeName(IncidentType type)
@@ -577,6 +738,14 @@ static const char *IncidentStatusName(IncidentStatus status)
         case INCIDENT_RESOLVED: return "Resolved";
 
         case INCIDENT_FAILED: return "FAILED";
+
+        case INCIDENT_SECURING: return "Securing scene";
+
+        case INCIDENT_FIREFIGHTING: return "Firefighting";
+
+        case INCIDENT_TREATING: return "Treating patient";
+
+        case INCIDENT_TRANSPORTING: return "Transporting";
 
         default: return "Unknown";
 
@@ -624,6 +793,60 @@ static const char *CallerReportForType(IncidentType type, int callNumber)
 
 
 
+static int DrawButtonIcon(Rectangle rect, const char *label)
+{
+    float cy = rect.y + rect.height * 0.5f;
+    if (strstr(label, "FIRE")) {
+        DrawIncidentIcon(INCIDENT_FIRE, (Vector2){rect.x + 13, cy}, 6, RAYWHITE);
+    } else if (strstr(label, "POLICE")) {
+        DrawIncidentIcon(INCIDENT_CRIME, (Vector2){rect.x + 13, cy}, 6, RAYWHITE);
+    } else if (strstr(label, "AMBULANCE") || strstr(label, "MEDICAL")) {
+        DrawIncidentIcon(INCIDENT_MEDICAL, (Vector2){rect.x + 13, cy}, 6, RAYWHITE);
+    } else if (strstr(label, "PAUSE")) {
+        DrawRectangleRounded((Rectangle){rect.x + 9, cy - 6, 4, 12}, 0.3f, 3, RAYWHITE);
+        DrawRectangleRounded((Rectangle){rect.x + 16, cy - 6, 4, 12}, 0.3f, 3, RAYWHITE);
+    } else if (strstr(label, "RESUME")) {
+        DrawTriangle((Vector2){rect.x + 9, cy - 7}, (Vector2){rect.x + 9, cy + 7},
+                     (Vector2){rect.x + 20, cy}, RAYWHITE);
+    } else if (strstr(label, "DISPATCH")) {
+        DrawLineEx((Vector2){rect.x + 7, cy}, (Vector2){rect.x + 18, cy}, 2, RAYWHITE);
+        DrawLineEx((Vector2){rect.x + 13, cy - 5}, (Vector2){rect.x + 18, cy}, 2, RAYWHITE);
+        DrawLineEx((Vector2){rect.x + 13, cy + 5}, (Vector2){rect.x + 18, cy}, 2, RAYWHITE);
+    } else if (strstr(label, "REPORT")) {
+        Rectangle page = {rect.x + 8, cy - 7, 11, 14};
+        DrawRectangleLinesEx(page, 1.2f, RAYWHITE);
+        DrawLine((int)page.x + 2, (int)page.y + 4, (int)page.x + 8, (int)page.y + 4, RAYWHITE);
+        DrawLine((int)page.x + 2, (int)page.y + 8, (int)page.x + 8, (int)page.y + 8, RAYWHITE);
+    } else if (strstr(label, "SETTING")) {
+        Vector2 center = {rect.x + 13, cy};
+        DrawCircleLines((int)center.x, (int)center.y, 6, RAYWHITE);
+        DrawCircleV(center, 2, RAYWHITE);
+        for (int i = 0; i < 4; i++) {
+            float angle = (float)i * PI * 0.5f;
+            DrawLineEx((Vector2){center.x + cosf(angle) * 6.5f, center.y + sinf(angle) * 6.5f},
+                       (Vector2){center.x + cosf(angle) * 8.5f, center.y + sinf(angle) * 8.5f},
+                       1.5f, RAYWHITE);
+        }
+    } else if (strstr(label, "RESET")) {
+        Vector2 center = {rect.x + 13, cy};
+        DrawCircleLines((int)center.x, (int)center.y, 6, RAYWHITE);
+        DrawTriangle((Vector2){center.x + 2, center.y - 8},
+                     (Vector2){center.x + 8, center.y - 4},
+                     (Vector2){center.x + 2, center.y - 2}, RAYWHITE);
+    } else if (strstr(label, "COMPARE")) {
+        DrawRectangle(rect.x + 8, cy - 6, 4, 12, RAYWHITE);
+        DrawRectangle(rect.x + 15, cy - 3, 4, 9, RAYWHITE);
+    } else if (strstr(label, "SLOW") || strstr(label, "FAST") ||
+               strstr(label, "1x") || strstr(label, "STEP")) {
+        Vector2 center = {rect.x + 13, cy + 2};
+        DrawCircleLines((int)center.x, (int)center.y, 6, RAYWHITE);
+        DrawLineEx(center, (Vector2){center.x + 3, center.y - 4}, 1.5f, RAYWHITE);
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
 static void DrawButton(Rectangle rect, const char *label, Color color)
 
 {
@@ -631,11 +854,14 @@ static void DrawButton(Rectangle rect, const char *label, Color color)
     Rectangle shadow = {rect.x + 2, rect.y + 3, rect.width, rect.height};
     DrawRectangleRounded(shadow, 0.18f, 8, (Color){0, 0, 0, 38});
     DrawRectangleRounded(rect, 0.18f, 8, color);
-    DrawRectangleRoundedLines(rect, 0.18f, 8, (Color){255, 255, 255, 150});
+    DrawRectangleRoundedLines(rect, 0.18f, 8, (Color){117, 157, 183, 165});
 
-    int textWidth = MeasureText(label, 11);
+    int hasIcon = rect.width >= 70.0f ? DrawButtonIcon(rect, label) : 0;
+    int textWidth = MeasureUiText(label, 11);
+    float contentX = rect.x + (hasIcon ? 21.0f : 0.0f);
+    float contentWidth = rect.width - (hasIcon ? 21.0f : 0.0f);
 
-    DrawText(label, (int)(rect.x + (rect.width - textWidth) / 2),
+    DrawText(label, (int)(contentX + (contentWidth - textWidth) / 2),
 
              (int)(rect.y + (rect.height - 11) / 2), 11, RAYWHITE);
 
@@ -701,8 +927,8 @@ static const char *ServiceName(IncidentType service)
 
 static void DrawPanel(Rectangle rect)
 {
-    DrawRectangleRounded(rect, 0.04f, 12, (Color){13, 29, 45, 255});
-    DrawRectangleRoundedLines(rect, 0.04f, 12, (Color){39, 62, 79, 255});
+    DrawRectangleRounded(rect, 0.04f, 12, (Color){11, 27, 43, 255});
+    DrawRectangleRoundedLines(rect, 0.04f, 12, (Color){39, 73, 96, 255});
 }
 
 static int CountActiveForService(const Simulation *simulation, IncidentType service)
@@ -711,6 +937,17 @@ static int CountActiveForService(const Simulation *simulation, IncidentType serv
     for (int i = 0; i < simulation->incidentCount; i++) {
         const Incident *incident = &simulation->incidents[i];
         if (SimulationServiceForIncident(incident->type) == service && !IsIncidentFinished(incident)) count++;
+    }
+    return count;
+}
+
+static int CountActiveHazards(const Simulation *simulation)
+{
+    int count = 0;
+    for (int i = 0; i < simulation->incidentCount; i++) {
+        const Incident *incident = &simulation->incidents[i];
+        if ((incident->type == INCIDENT_FIRE || incident->type == INCIDENT_ACCIDENT) &&
+            !IsIncidentFinished(incident)) count++;
     }
     return count;
 }
@@ -745,20 +982,20 @@ static void DrawServiceSummary(const Simulation *simulation, IncidentType servic
                                int x, int y, Color color)
 {
     const IncidentType iconType = service == INCIDENT_ACCIDENT ? INCIDENT_MEDICAL : service;
-    DrawRectangleRounded((Rectangle){(float)x, (float)y, 316, 64}, 0.08f, 8,
+    DrawRectangleRounded((Rectangle){(float)x, (float)y, 316, 32}, 0.08f, 8,
                         (Color){20, 42, 60, 255});
-    DrawIncidentIcon(iconType, (Vector2){(float)x + 21, (float)y + 20}, 9, color);
-    DrawText(ServiceName(service), x + 42, y + 9, 14, RAYWHITE);
+    DrawIncidentIcon(iconType, (Vector2){(float)x + 20, (float)y + 16}, 7, color);
+    DrawText(ServiceName(service), x + 36, y + 2, 10, RAYWHITE);
     DrawText(TextFormat("Available %d / %d  |  Active %d",
              SimulationCountAvailableVehicles(simulation, service),
              CountFleetForService(simulation, service),
-             CountActiveForService(simulation, service)), x + 42, y + 31, 11,
+             CountActiveForService(simulation, service)), x + 36, y + 14, 7,
              (Color){179, 198, 211, 255});
     float average = AverageResponseForService(simulation, service);
     DrawText(average < 0.0f ? TextFormat("Resolved %d  |  Avg response --",
              simulation->resolvedByType[service]) :
              TextFormat("Resolved %d  |  Avg response %.1fs",
-             simulation->resolvedByType[service], average), x + 42, y + 47, 9,
+             simulation->resolvedByType[service], average), x + 36, y + 23, 7,
              (Color){141, 161, 175, 255});
 }
 
@@ -773,17 +1010,16 @@ static void DrawOperationalSummary(const Simulation *simulation)
     for (int i = 0; i < simulation->incidentCount; i++) {
         const Incident *incident = &simulation->incidents[i];
         if (!IsIncidentFinished(incident) &&
-            CountAssignedUnits(simulation, i) < incident->requiredUnits) waitingForUnits++;
+            CountAssignedUnits(simulation, i) < CountRequiredUnits(incident)) waitingForUnits++;
     }
 
-    DrawLine(1260, 728, 1565, 728, (Color){43, 67, 83, 255});
-    DrawText("CITY OPERATIONS", 1260, 737, 12, (Color){107, 190, 238, 255});
-    DrawText(TextFormat("Available fleet %d / %d", available, simulation->vehicleCount),
-             1260, 756, 10, (Color){177, 195, 207, 255});
-    DrawText(TextFormat("Calls waiting for units %d", waitingForUnits),
-             1260, 772, 10, (Color){177, 195, 207, 255});
+    DrawLine(1260, 663, 1565, 663, (Color){43, 67, 83, 255});
+    DrawText("CITY OPERATIONS", 1260, 667, 9, (Color){107, 190, 238, 255});
+    DrawText(TextFormat("Fleet %d/%d ready  |  Waiting for units %d",
+             available, simulation->vehicleCount, waitingForUnits),
+             1260, 682, 7, (Color){177, 195, 207, 255});
     DrawText(recorded > 0 ? TextFormat("On-time first arrivals %d / %d", onTime, recorded) :
-             "On-time first arrivals -- (no arrivals yet)", 1260, 788, 10,
+             "On-time first arrivals -- (no arrivals yet)", 1260, 695, 7,
              (Color){177, 195, 207, 255});
 }
 
@@ -840,7 +1076,7 @@ static void DrawIncidentQueue(const Simulation *simulation, const int order[MAX_
             const Incident *incident = incidentIndex >= 0 &&
                 incidentIndex < simulation->incidentCount ? &simulation->incidents[incidentIndex] : NULL;
             float y = queueRowsY + row * queueRowHeight;
-            Rectangle card = {26, y, 254, 70};
+            Rectangle card = {26, y, 254, 74};
             Color typeColor = incident ? IncidentColor(incident->type) : (Color){232, 166, 70, 255};
             Color urgencyColor = incident && incident->severity >= 3 ? (Color){255, 112, 91, 255} :
                                  incident && incident->severity == 2 ? (Color){255, 189, 85, 255} :
@@ -863,19 +1099,20 @@ static void DrawIncidentQueue(const Simulation *simulation, const int order[MAX_
             const char *progress = !call->classified ? "NEEDS CLASSIFICATION" :
                 CallIsTerminal(simulation, callIndex) && incident->status == INCIDENT_RESOLVED ? "RESOLVED" :
                 CallIsTerminal(simulation, callIndex) && incident->status == INCIDENT_FAILED ? "FAILED" :
-                !call->dispatched ? "WAITING FOR SUITABLE UNITS" : "UNITS RESPONDING";
+                !call->dispatched ? "WAITING FOR SUITABLE UNITS" :
+                IncidentStatusName(incident->status);
             Color progressColor = CallIsTerminal(simulation, callIndex) && incident &&
                                   incident->status == INCIDENT_FAILED ? RED :
                                   CallIsTerminal(simulation, callIndex) && incident &&
                                   incident->status == INCIDENT_RESOLVED ? GREEN :
                                   !call->classified || !call->dispatched ? ORANGE : SKYBLUE;
             DrawText(progress, 67, (int)y + 22, 8, progressColor);
-            DrawText(TextFormat("%.50s", call->report), 67, (int)y + 36, 8,
-                     (Color){190, 205, 214, 255});
+            DrawWrappedText(call->report, 67, (int)y + 34, 8, 38, 8,
+                            (Color){190, 205, 214, 255});
             int assigned = incident ? CountAssignedUnits(simulation, incidentIndex) : 0;
-            int required = incident ? incident->requiredUnits : 0;
+            int required = incident ? CountRequiredUnits(incident) : 0;
             DrawText(TextFormat("RECEIVED T+%.0fs   UNITS %d/%d",
-                     call->receivedAt, assigned, required), 67, (int)y + 52, 8, urgencyColor);
+                     call->receivedAt, assigned, required), 67, (int)y + 62, 7, urgencyColor);
         }
     }
 }
@@ -1033,7 +1270,7 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedCall,
             DrawText(TextFormat("REQUIRED  %d x %s", GetRequiredUnits(manualType, manualSeverity),
                      ServiceName(SimulationServiceForIncident(manualType))),
                      1460, 304, 9, RAYWHITE);
-            DrawButton(manualClassifyButton,
+            DrawButton(ManualClassifyButtonBounds(),
                        call->classified ? "UPDATE CLASSIFICATION" : "CLASSIFY CALL",
                        BLUE);
             DrawText(TextFormat("RECEIVED T+%.1fs  |  CLASSIFICATION PENDING",
@@ -1041,61 +1278,77 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedCall,
         } else if (incident) {
             float remaining = incident->deadline - incident->ageTime;
             if (remaining < 0.0f) remaining = 0.0f;
-            IncidentType service = SimulationServiceForIncident(incident->type);
-            int available = SimulationCountAvailableVehicles(simulation, service);
             float eta = SimulationEstimateIncidentETA(simulation, incidentIndex);
             DrawText(TextFormat("CLASSIFIED  %s  |  SEVERITY %d  |  PRIORITY %.0f",
                      IncidentTypeName(incident->type), incident->severity,
                      SimulationIncidentPriority(incident)), 1260, 255, 9, RAYWHITE);
-            DrawText(TextFormat("REQUIRED  %d x %s   |   AVAILABLE %d",
-                     incident->requiredUnits, ServiceName(service), available),
-                     1260, 272, 10, (Color){177, 195, 207, 255});
+            char requirements[128] = "ON SCENE / REQUIRED";
+            size_t used = strlen(requirements);
+            const char *serviceShortNames[SERVICE_COUNT] = {"FIRE", "POLICE", "EMS"};
+            for (int requiredService = 0; requiredService < SERVICE_COUNT; requiredService++) {
+                int required = incident->requiredUnitsByService[requiredService];
+                if (required <= 0 || used >= sizeof(requirements) - 1) continue;
+                int written = snprintf(requirements + used, sizeof(requirements) - used,
+                                       "  %s %d/%d", serviceShortNames[requiredService],
+                                       CountOnSceneService(simulation, incidentIndex,
+                                           (IncidentType)requiredService), required);
+                if (written > 0) used += (size_t)written;
+            }
+            DrawText(requirements, 1260, 272, 8, (Color){177, 195, 207, 255});
             DrawText(TextFormat("TIME LEFT %.1fs   |   ETA %s",
                      remaining, eta < 0.0f ? "--" : TextFormat("%.1fs", eta)),
                      1260, 289, 9, remaining < 6.0f ? ORANGE :
                      (Color){177, 195, 207, 255});
+            DrawText(TextFormat("RESPONSE STAGE  %s", IncidentStatusName(incident->status)),
+                     1260, 302, 8, (Color){155, 185, 202, 255});
 
             if (simulation->dispatchMode == DISPATCH_MANUAL && !call->dispatched) {
                 DrawText("SELECT SUITABLE UNITS  (all required before dispatch)",
-                         1260, 309, 9, (Color){107, 190, 238, 255});
-                int row = 0;
-                for (int i = 0; i < simulation->vehicleCount && row < 4; i++) {
+                         1260, 315, 9, (Color){107, 190, 238, 255});
+                int vehicleRows[MANUAL_VEHICLE_ROW_COUNT];
+                int rowCount = ManualVehicleRows(simulation, incident, vehicleRows);
+                for (int row = 0; row < rowCount; row++) {
+                    int i = vehicleRows[row];
                     const Vehicle *vehicle = &simulation->vehicles[i];
-                    if (vehicle->serviceType != service) continue;
-                    int y = 326 + row * 20;
-                    Rectangle vehicleRow = {1258, (float)y, 308, 18};
-                    int selectable = vehicle->available && !IsIncidentFinished(incident);
-                    int checked = selectable && (selectedVehicleMask & (1u << i)) != 0;
+                    Rectangle vehicleRow = ManualVehicleRowBounds(row);
+                    int y = (int)vehicleRow.y;
+                    int checked = (selectedVehicleMask & (1u << i)) != 0;
+                    int serviceSelected = ManualVehicleSelectedForService(
+                        selectedVehicleMask, simulation, vehicle->serviceType);
+                    int serviceRemaining = incident->requiredUnitsByService[vehicle->serviceType] -
+                        CountAssignedUnitsByService(simulation, incidentIndex, vehicle->serviceType);
+                    int selectable = vehicle->available && !IsIncidentFinished(incident) &&
+                                     (checked || serviceSelected < serviceRemaining);
                     DrawRectangleRounded(vehicleRow, 0.15f, 4,
                         checked ? (Color){29, 68, 91, 255} :
                         selectable ? (Color){18, 38, 54, 255} : (Color){27, 34, 43, 255});
-                    DrawVehicleIcon(vehicle->serviceType, (Vector2){1275, (float)y + 9});
-                    DrawText(TextFormat("%s %d  %s", ServiceName(service),
+                    DrawVehicleIcon(vehicle->serviceType, (Vector2){1275, (float)y + 7});
+                    DrawText(TextFormat("%s %d  %s", ServiceName(vehicle->serviceType),
                              ServiceUnitNumber(simulation, i),
                              selectable ? "AVAILABLE" : vehicle->available ? "CALL CLOSED" : "BUSY"),
-                             1294, y + 3, 8,
+                             1294, y + 2, 8,
                              selectable ? (Color){196, 211, 220, 255} : GRAY);
                     if (selectable) {
                         float unitEta = SimulationEstimateUnitETA(simulation, i, incidentIndex);
                         DrawText(unitEta < 0.0f ? "ETA --" : TextFormat("ETA %.1fs", unitEta),
-                                 1482, y + 3, 8, (Color){107, 190, 238, 255});
-                        DrawRectangleLinesEx((Rectangle){1543, (float)y + 2, 12, 12}, 1,
+                                 1482, y + 2, 8, (Color){107, 190, 238, 255});
+                        DrawRectangleLinesEx(ManualVehicleCheckboxBounds(row), 1,
                                              checked ? SKYBLUE : (Color){105, 129, 143, 255});
-                        if (checked) DrawText("x", 1545, y + 2, 10, SKYBLUE);
+                        if (checked) DrawText("x", 1545, y, 10, SKYBLUE);
                     } else {
-                        DrawText("IN USE", 1510, y + 3, 8, GRAY);
+                        DrawText(vehicle->available ? "LIMIT" : "IN USE",
+                                 1510, y + 2, 8, GRAY);
                     }
-                    row++;
                 }
-                if (row == 0)
+                if (rowCount == 0)
                     DrawText("No suitable vehicles are available; leave this call waiting.",
                              1260, 331, 8, ORANGE);
                 DrawButton(dispatchSelectedButton,
                     TextFormat("DISPATCH SELECTED  %d / %d",
                         CountSelectedVehicles(selectedVehicleMask),
-                        incident->requiredUnits - CountAssignedUnits(simulation, incidentIndex)),
+                        CountRequiredUnits(incident) - CountAssignedUnits(simulation, incidentIndex)),
                     CountSelectedVehicles(selectedVehicleMask) ==
-                        incident->requiredUnits - CountAssignedUnits(simulation, incidentIndex) &&
+                        CountRequiredUnits(incident) - CountAssignedUnits(simulation, incidentIndex) &&
                         CountSelectedVehicles(selectedVehicleMask) > 0 &&
                         !IsIncidentFinished(incident) ? BLUE : DARKGRAY);
             } else {
@@ -1110,16 +1363,22 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedCall,
                 DrawText("ASSIGNED UNITS", 1260, assignedStartY, 9,
                          (Color){107, 190, 238, 255});
                 int shown = 0;
-                for (int i = 0; i < simulation->vehicleCount && shown < 4; i++) {
+                for (int i = 0; i < simulation->vehicleCount && shown < MAX_VEHICLES; i++) {
                     const Vehicle *vehicle = &simulation->vehicles[i];
                     if (vehicle->assignedIncident != incidentIndex) continue;
                     int y = assignedStartY + 15 + shown * 21;
                     DrawVehicleIcon(vehicle->serviceType, (Vector2){1275, (float)y + 8});
+                    const char *unitState = vehicle->activity == UNIT_TRANSPORTING ? "TRANSPORTING" :
+                                            vehicle->activity == UNIT_RETURNING ? "RETURNING" :
+                                            vehicle->arrived ? "ON SCENE" : "EN ROUTE";
                     DrawText(TextFormat("%s %d  %s", ServiceName(vehicle->serviceType),
-                             ServiceUnitNumber(simulation, i), vehicle->arrived ? "ON SCENE" : "EN ROUTE"),
+                             ServiceUnitNumber(simulation, i), unitState),
                              1294, y + 2, 8, RAYWHITE);
                     float unitEta = SimulationEstimateUnitETA(simulation, i, incidentIndex);
-                    DrawText(vehicle->arrived ? "ARRIVED" :
+                    DrawText(vehicle->activity == UNIT_TRANSPORTING ?
+                             (unitEta < 0.0f ? "HOSP --" : TextFormat("HOSP %.1fs", unitEta)) :
+                             vehicle->activity == UNIT_RETURNING ? "RETURNING" :
+                             vehicle->arrived ? "ARRIVED" :
                              unitEta < 0.0f ? "ETA --" : TextFormat("ETA %.1fs", unitEta),
                              1482, y + 2, 8, (Color){107, 190, 238, 255});
                     shown++;
@@ -1129,19 +1388,21 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedCall,
                              1260, 433, 8, ORANGE);
             }
 
+            int manualSelecting = simulation->dispatchMode == DISPATCH_MANUAL && !call->dispatched;
+            int timelineY = manualSelecting ? 504 : 480;
             float callToDispatch = call->dispatched ? call->dispatchedAt - call->receivedAt : -1.0f;
             DrawText(callToDispatch >= 0.0f ?
                      TextFormat("RECEIVED T+%.1f  |  CLASSIFIED T+%.1f  |  DISPATCH %.1fs",
                                 call->receivedAt, call->classifiedAt, callToDispatch) :
                      TextFormat("RECEIVED T+%.1f  |  CLASSIFIED T+%.1f  |  AWAITING DISPATCH",
                                 call->receivedAt, call->classifiedAt),
-                     1260, 460, 8, (Color){155, 185, 202, 255});
+                     1260, timelineY, 8, (Color){155, 185, 202, 255});
             DrawText(TextFormat("First arrival: %s", incident->responseRecorded ?
                      TextFormat("%.1fs after call", incident->responseTime) : "pending"),
-                     1260, 471, 8, (Color){155, 185, 202, 255});
+                     1260, timelineY + 11, 8, (Color){155, 185, 202, 255});
             if (call->feedbackReady)
                 DrawText(call->callerSatisfied ? "CALLER FEEDBACK: SATISFIED" :
-                         "CALLER FEEDBACK: DISSATISFIED", 1260, 485, 10,
+                         "CALLER FEEDBACK: DISSATISFIED", 1260, timelineY + 22, 9,
                          call->callerSatisfied ? GREEN : (Color){255, 105, 110, 255});
         } else if (simulation->dispatchMode == DISPATCH_AUTOMATIC) {
             DrawText("AUTO OPERATOR IS CLASSIFYING THIS REPORT", 1260, 268, 9, SKYBLUE);
@@ -1169,11 +1430,11 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedCall,
                  1260, 225, 10, (Color){177, 195, 207, 255});
     }
 
-    DrawLine(1260, 478, 1565, 478, (Color){43, 67, 83, 255});
-    DrawText("SERVICE AVAILABILITY", 1260, 492, 12, (Color){107, 190, 238, 255});
-    DrawServiceSummary(simulation, INCIDENT_FIRE, 1254, 514, IncidentColor(INCIDENT_FIRE));
-    DrawServiceSummary(simulation, INCIDENT_CRIME, 1254, 584, IncidentColor(INCIDENT_CRIME));
-    DrawServiceSummary(simulation, INCIDENT_ACCIDENT, 1254, 654, IncidentColor(INCIDENT_MEDICAL));
+    DrawLine(1260, 539, 1565, 539, (Color){43, 67, 83, 255});
+    DrawText("SERVICE AVAILABILITY", 1260, 543, 10, (Color){107, 190, 238, 255});
+    DrawServiceSummary(simulation, INCIDENT_FIRE, 1254, 558, IncidentColor(INCIDENT_FIRE));
+    DrawServiceSummary(simulation, INCIDENT_CRIME, 1254, 592, IncidentColor(INCIDENT_CRIME));
+    DrawServiceSummary(simulation, INCIDENT_ACCIDENT, 1254, 626, IncidentColor(INCIDENT_MEDICAL));
     DrawOperationalSummary(simulation);
 }
 
@@ -1210,15 +1471,17 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
                      (int)(mapClip.width * UI_RENDER_SCALE),
                      (int)(mapClip.height * UI_RENDER_SCALE));
     BeginMode2D(mapCamera);
-    DrawCity();
+    DrawCity(simulation);
     DrawCityWeather(simulation);
     if (showCivilianTraffic)
         for (int i = 0; i < simulation->civilianCount; i++)
             DrawCivilianCar(&simulation->civilianCars[i]);
+    for (int i = 0; i < simulation->pedestrianCount; i++)
+        DrawPedestrian(&simulation->pedestrians[i], simulation->elapsedTime);
 
     for (int i = 0; showRoutes && i < simulation->vehicleCount; i++) {
         const Vehicle *vehicle = &simulation->vehicles[i];
-        if (vehicle->available || vehicle->arrived || vehicle->routeCount < 2) continue;
+        if (vehicle->available || vehicle->activity == UNIT_ON_SCENE || vehicle->routeCount < 2) continue;
 
         Color routeColor = vehicle->serviceType == INCIDENT_FIRE ? RED :
                            vehicle->serviceType == INCIDENT_CRIME ? BLUE : DARKGREEN;
@@ -1230,12 +1493,131 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
         }
     }
 
-    for (int i = 0; i < simulation->vehicleCount; i++)
-        DrawVehicleIcon(simulation->vehicles[i].serviceType, simulation->vehicles[i].position);
+    for (int i = 0; i < simulation->vehicleCount; i++) {
+        const Vehicle *vehicle = &simulation->vehicles[i];
+        DrawVehicleIcon(vehicle->serviceType, vehicle->position);
+        if (vehicle->activity == UNIT_TRANSPORTING) {
+            // A small passenger marker rides with the ambulance only during transport.
+            DrawRectangle((int)vehicle->position.x - 3, (int)vehicle->position.y - 9, 7, 2,
+                          (Color){228, 239, 232, 255});
+            DrawCircle((int)vehicle->position.x - 1, (int)vehicle->position.y - 11, 1.5f,
+                       (Color){238, 199, 163, 255});
+            DrawLine((int)vehicle->position.x + 1, (int)vehicle->position.y - 9,
+                     (int)vehicle->position.x + 5, (int)vehicle->position.y - 9,
+                     (Color){77, 220, 162, 255});
+            DrawText("TO HOSPITAL", (int)vehicle->position.x + 10,
+                     (int)vehicle->position.y - 11, 6, (Color){114, 224, 190, 255});
+        } else if (vehicle->activity == UNIT_RETURNING)
+            DrawText("RETURNING", (int)vehicle->position.x + 10,
+                     (int)vehicle->position.y - 11, 6, (Color){190, 205, 216, 255});
+    }
 
     for (int i = 0; i < simulation->incidentCount; i++) {
         const Incident *incident = &simulation->incidents[i];
-        DrawActiveIncidentEffect(incident, i, simulation->elapsedTime);
+        if (incident->needsSceneSecurity && incident->sceneSecured && !IsIncidentFinished(incident)) {
+            DrawCircleLines((int)incident->position.x, (int)incident->position.y, 37.0f,
+                           Fade((Color){78, 164, 245, 255}, 0.8f));
+            DrawCircleLines((int)incident->position.x, (int)incident->position.y, 41.0f,
+                           Fade((Color){78, 164, 245, 255}, 0.35f));
+            DrawText("POLICE CORDON", (int)incident->position.x - 33,
+                     (int)incident->position.y + 40, 7, (Color){120, 188, 245, 255});
+        }
+        if (IsIncidentFinished(incident)) continue;
+
+        if (incident->status == INCIDENT_SECURING &&
+            HasRequiredOnSceneService(simulation, i, INCIDENT_CRIME)) {
+            DrawLineEx((Vector2){incident->position.x - 21, incident->position.y - 17},
+                       (Vector2){incident->position.x + 21, incident->position.y - 17},
+                       2.0f, Fade((Color){87, 164, 246, 255}, 0.82f));
+            DrawLineEx((Vector2){incident->position.x - 21, incident->position.y + 17},
+                       (Vector2){incident->position.x + 21, incident->position.y + 17},
+                       2.0f, Fade((Color){87, 164, 246, 255}, 0.82f));
+            for (int v = 0; v < simulation->vehicleCount; v++) {
+                const Vehicle *unit = &simulation->vehicles[v];
+                if (unit->assignedIncident == i && unit->serviceType == INCIDENT_CRIME &&
+                    unit->arrived && unit->activity == UNIT_ON_SCENE)
+                    DrawResponderFigure((Vector2){unit->position.x + 7, unit->position.y + 7},
+                                        (Color){104, 170, 244, 255}, "SECURE");
+            }
+        }
+
+        if (incident->status == INCIDENT_FIREFIGHTING &&
+            HasRequiredOnSceneService(simulation, i, INCIDENT_FIRE)) {
+            for (int v = 0; v < simulation->vehicleCount; v++) {
+                const Vehicle *unit = &simulation->vehicles[v];
+                if (unit->assignedIncident != i || unit->serviceType != INCIDENT_FIRE ||
+                    !unit->arrived || unit->activity != UNIT_ON_SCENE)
+                    continue;
+                Vector2 nozzle = {unit->position.x, unit->position.y - 7};
+                DrawLineEx(nozzle, incident->position, 4.0f, (Color){77, 176, 239, 175});
+                DrawLineEx(nozzle, incident->position, 1.6f, (Color){197, 233, 255, 240});
+                DrawCircleV(incident->position, 3.5f, (Color){160, 220, 255, 220});
+                DrawResponderFigure((Vector2){unit->position.x + 8, unit->position.y + 7},
+                                    (Color){255, 171, 84, 255}, "HOSE");
+            }
+        }
+
+        if (incident->status == INCIDENT_TREATING &&
+            HasRequiredOnSceneService(simulation, i, INCIDENT_ACCIDENT)) {
+            Vector2 patient = {incident->position.x + 16, incident->position.y + 10};
+            DrawLineEx((Vector2){patient.x - 5, patient.y + 2},
+                       (Vector2){patient.x + 6, patient.y + 2}, 2.5f,
+                       (Color){226, 237, 235, 255});
+            DrawCircle((int)patient.x - 3, (int)patient.y - 1, 2.0f,
+                       (Color){237, 198, 164, 255});
+            DrawResponderFigure((Vector2){patient.x + 9, patient.y - 4},
+                                (Color){82, 224, 171, 255}, "TREAT");
+            for (int v = 0; v < simulation->vehicleCount; v++) {
+                const Vehicle *unit = &simulation->vehicles[v];
+                if (unit->assignedIncident == i && unit->serviceType == INCIDENT_ACCIDENT &&
+                    unit->arrived && unit->activity == UNIT_ON_SCENE)
+                    DrawLineEx((Vector2){unit->position.x, unit->position.y + 5}, patient,
+                               1.3f, Fade((Color){82, 224, 171, 255}, 0.75f));
+            }
+        }
+
+        int policeOnScene = HasRequiredOnSceneService(simulation, i, INCIDENT_CRIME);
+        const char *policeTask = NULL;
+        Color policeColor = (Color){107, 172, 245, 255};
+        if (incident->type == INCIDENT_CRIME && incident->status == INCIDENT_RESPONDING &&
+            policeOnScene)
+            policeTask = incident->severity >= 3 ? "ARREST" : "QUESTION";
+        else if (incident->status != INCIDENT_SECURING && policeOnScene &&
+                 (incident->type == INCIDENT_FIRE || incident->type == INCIDENT_ACCIDENT) &&
+                 (incident->status == INCIDENT_FIREFIGHTING ||
+                  incident->status == INCIDENT_TREATING ||
+                  incident->status == INCIDENT_TRANSPORTING)) {
+            policeTask = "TRAFFIC";
+            policeColor = (Color){255, 207, 93, 255};
+        }
+        if (policeTask) {
+            for (int v = 0; v < simulation->vehicleCount; v++) {
+                const Vehicle *unit = &simulation->vehicles[v];
+                if (unit->assignedIncident != i || unit->serviceType != INCIDENT_CRIME ||
+                    !unit->arrived || unit->activity != UNIT_ON_SCENE) continue;
+                Vector2 officer = {unit->position.x + 8, unit->position.y + 7};
+                DrawResponderFigure(officer, policeColor, policeTask);
+                if (strcmp(policeTask, "TRAFFIC") == 0) {
+                    DrawLineEx((Vector2){officer.x - 5, officer.y - 1},
+                               (Vector2){officer.x + 5, officer.y - 1}, 1.4f, policeColor);
+                    DrawTriangle((Vector2){officer.x + 5, officer.y - 4},
+                                 (Vector2){officer.x + 9, officer.y - 1},
+                                 (Vector2){officer.x + 5, officer.y + 2}, policeColor);
+                } else if (strcmp(policeTask, "ARREST") == 0) {
+                    DrawCircleLines((int)officer.x + 5, (int)officer.y - 1, 2.2f, policeColor);
+                    DrawCircleLines((int)officer.x + 9, (int)officer.y - 1, 2.2f, policeColor);
+                } else {
+                    DrawCircle((int)officer.x + 7, (int)officer.y - 8, 1.0f, RAYWHITE);
+                    DrawCircle((int)officer.x + 10, (int)officer.y - 10, 1.0f, RAYWHITE);
+                }
+            }
+        }
+    }
+
+
+    for (int i = 0; i < simulation->incidentCount; i++) {
+        const Incident *incident = &simulation->incidents[i];
+        DrawActiveIncidentEffect(incident, i, simulation->elapsedTime, simulation->cityCondition);
         Color color = incident->status == INCIDENT_RESOLVED ? GREEN :
                       incident->status == INCIDENT_FAILED ? GRAY :
                       incident->severity >= 3 ? RED :
@@ -1259,10 +1641,24 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
         if (i == selectedIncident)
             DrawCircleLines((int)incident->position.x, (int)incident->position.y,
                             radius + 6.0f, GOLD);
-        DrawText(IsIncidentFinished(incident) ? IncidentStatusName(incident->status) :
+        DrawText(IsIncidentFinished(incident) ||
+                 incident->status == INCIDENT_SECURING ||
+                 incident->status == INCIDENT_FIREFIGHTING ||
+                 incident->status == INCIDENT_TREATING ||
+                 incident->status == INCIDENT_TRANSPORTING ? IncidentStatusName(incident->status) :
                  TextFormat("S%d  %d/%d", incident->severity,
-                            CountArrivedUnits(simulation, i), incident->requiredUnits),
+                            CountArrivedUnits(simulation, i), CountRequiredUnits(incident)),
                  (int)incident->position.x + 12, (int)incident->position.y - 8, 10, color);
+    }
+    if (simulation->apartmentFireDrill && simulation->incidentCount > 0 &&
+        simulation->incidents[0].fireSpreadOccurred &&
+        !IsIncidentFinished(&simulation->incidents[0])) {
+        Vector2 nearby = {883, 163};
+        float flicker = 6.0f + 2.5f * sinf(simulation->elapsedTime * 7.0f);
+        DrawTriangle((Vector2){nearby.x, nearby.y - flicker},
+                     (Vector2){nearby.x - 5, nearby.y + 5},
+                     (Vector2){nearby.x + 5, nearby.y + 5}, ORANGE);
+        DrawCircle((int)nearby.x - 3, (int)nearby.y - 14, 4, (Color){150, 161, 166, 100});
     }
     for (int i = 0; i < simulation->callCount; i++) {
         const EmergencyCall *call = &simulation->calls[i];
@@ -1351,7 +1747,7 @@ static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
                TextFormat("CITY CONDITIONS: %s  (CLICK TO CHANGE)",
                           SimulationCityConditionName(simulation->cityCondition)),
                (Color){31, 92, 132, 255});
-    DrawText("Visual weather only; roads and ETA rules are unchanged.",
+    DrawText("Wind can spread severe fires; other conditions change map visibility.",
              550, 523, 10, (Color){154, 181, 198, 255});
     DrawText(TextFormat("Dispatch: %s  |  Traffic: %s",
              simulation->dispatchMode == DISPATCH_AUTOMATIC ? "Automatic" : "Manual",
@@ -1372,6 +1768,7 @@ int main(void)
     SetConfigFlags(FLAG_WINDOW_HIGHDPI | FLAG_WINDOW_RESIZABLE);
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Emergency City Simulation");
     SetWindowMinSize(1120, 630);
+    LoadUiFont();
 
     SetTargetFPS(60);
 
@@ -1452,6 +1849,27 @@ int main(void)
 
         if (IsKeyPressed(KEY_FOUR)) selectedType = INCIDENT_MEDICAL;
 
+        if (IsKeyPressed(KEY_A)) {
+            int drillSeverity = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) ? 1 : 3;
+            if (SimulationStartApartmentFireDrillAtSeverity(&simulation, drillSeverity)) {
+                selectedCall = 0;
+                selectedIncident = -1;
+                selectedVehicleMask = 0;
+                selectedType = INCIDENT_FIRE;
+                manualCallType = INCIDENT_FIRE;
+                manualCallSeverity = drillSeverity;
+                comparisonReady = false;
+                if (simulation.dispatchMode == DISPATCH_AUTOMATIC) {
+                    simulation.calls[0].overridePending = 1;
+                    StartPendingOverrideModal(&simulation, &paused,
+                        &overrideResumeWhenDone, &overrideModalCall,
+                        &overrideModalDeadline);
+                } else {
+                    SimulationProcessOperator(&simulation);
+                }
+            }
+        }
+
         if (IsKeyPressed(KEY_SPACE)) paused = !paused;
 
         if (IsKeyPressed(KEY_S)) {
@@ -1491,6 +1909,12 @@ int main(void)
             selectedIncident = -1;
             selectedVehicleMask = 0;
             overlay = OVERLAY_NONE;
+            overrideModalCall = -1;
+            overrideResumeWhenDone = false;
+            overrideModalDeadline = 0.0;
+            operatorNotice[0] = '\0';
+            operatorNoticeMatched = 0;
+            operatorNoticeUntil = 0.0;
         }
         }
 
@@ -1562,10 +1986,8 @@ int main(void)
                         simulation.calls[i].overridePending = 0;
                 }
 
-            } else if (CheckCollisionPointRec(mouse, manualClassifyButton) &&
-                       simulation.dispatchMode == DISPATCH_MANUAL && selectedCall >= 0 &&
-                       selectedCall < simulation.callCount &&
-                       !simulation.calls[selectedCall].dispatched) {
+            } else if (simulation.dispatchMode == DISPATCH_MANUAL &&
+                       ManualClassifyButtonHit(&simulation, selectedCall, mouse)) {
 
                 if (SimulationClassifyCall(&simulation, selectedCall, manualCallType,
                                            manualCallSeverity))
@@ -1605,7 +2027,7 @@ int main(void)
 
                 int incidentIndex = selectedCall >= 0 ? CallIncidentIndex(&simulation, selectedCall) : -1;
                 int required = incidentIndex >= 0 ?
-                    simulation.incidents[incidentIndex].requiredUnits -
+                    CountRequiredUnits(&simulation.incidents[incidentIndex]) -
                     CountAssignedUnits(&simulation, incidentIndex) : 0;
                 if (simulation.dispatchMode == DISPATCH_MANUAL && selectedCall >= 0 &&
                     !simulation.calls[selectedCall].dispatched && required > 0 &&
@@ -1643,6 +2065,13 @@ int main(void)
                 selectedCall = -1;
                 selectedIncident = -1;
                 selectedVehicleMask = 0;
+                overlay = OVERLAY_NONE;
+                overrideModalCall = -1;
+                overrideResumeWhenDone = false;
+                overrideModalDeadline = 0.0;
+                operatorNotice[0] = '\0';
+                operatorNoticeMatched = 0;
+                operatorNoticeUntil = 0.0;
 
             } else if (CheckCollisionPointRec(mouse, queuePanel) &&
                        mouse.y >= queueRowsY && queueCount > 0) {
@@ -1677,21 +2106,19 @@ int main(void)
                 } else if (call->classified && !call->dispatched && selectedIncident >= 0 &&
                            !IsIncidentFinished(&simulation.incidents[selectedIncident])) {
                     Incident *incident = &simulation.incidents[selectedIncident];
-                    int remaining = incident->requiredUnits - CountAssignedUnits(&simulation, selectedIncident);
-                    IncidentType service = SimulationServiceForIncident(incident->type);
-                    int row = 0;
-                    for (int i = 0; i < simulation.vehicleCount && row < 4; i++) {
-                        Vehicle *vehicle = &simulation.vehicles[i];
-                        if (vehicle->serviceType != service) continue;
-                        Rectangle vehicleRow = {1258, 326.0f + row * 20.0f, 308, 18};
-                        if (CheckCollisionPointRec(mouse, vehicleRow) && vehicle->available) {
-                            unsigned int bit = 1u << i;
-                            if (selectedVehicleMask & bit) selectedVehicleMask &= ~bit;
-                            else if (CountSelectedVehicles(selectedVehicleMask) < remaining)
-                                selectedVehicleMask |= bit;
+                    int vehicleRows[MANUAL_VEHICLE_ROW_COUNT];
+                    int rowCount = ManualVehicleRows(&simulation, incident, vehicleRows);
+                    for (int row = 0; row < rowCount; row++) {
+                        unsigned int updatedMask = ManualVehicleToggleSelection(
+                            &simulation, incident, selectedIncident, row, mouse,
+                            selectedVehicleMask);
+                        if (updatedMask != selectedVehicleMask) {
+                            selectedVehicleMask = updatedMask;
                             break;
                         }
-                        row++;
+                        // A click on an already-selected row can leave the mask
+                        // unchanged only when the row was unavailable or outside
+                        // its hitbox. Keep checking rows so later rows remain usable.
                     }
                 }
             } else if (CheckCollisionPointRec(mouse, cityView)) {
@@ -1755,6 +2182,10 @@ int main(void)
         UpdateCallerFeedbackToast(&simulation, operatorNotice, sizeof(operatorNotice),
                                   &operatorNoticeMatched, &operatorNoticeUntil);
 
+        // Input can create or reset calls after the hit-test queue was built.
+        // Rebuild it before drawing so the same frame never renders stale rows.
+        queueCount = BuildCallQueueOrder(&simulation, queueOrder);
+
 
 
         BeginTextureMode(uiCanvas);
@@ -1771,12 +2202,13 @@ int main(void)
         int waitingCalls = 0;
         for (int call = 0; call < simulation.callCount; call++)
             if (!simulation.calls[call].dispatched && !CallIsTerminal(&simulation, call)) waitingCalls++;
-        DrawText(TextFormat("CALLS %d  |  WAITING %d  |  ACTIVE %d",
+        DrawText(TextFormat("CALLS %d  |  WAIT %d  |  ACTIVE %d",
                  simulation.callCount, waitingCalls, SimulationCountUnresolved(&simulation)),
-                 500, 21, 12, (Color){177, 198, 211, 255});
+                 500, 21, 11, (Color){177, 198, 211, 255});
         int onTime, arrivals;
         OnTimeArrivalCounts(&simulation, &onTime, &arrivals);
-        DrawText(TextFormat("RESOLVED %d  |  FAILED %d  |  ON-TIME ARRIVALS %s",
+        DrawText(TextFormat("HAZARDS %d  |  RES %d  |  FAIL %d  |  ON-TIME %s",
+                 CountActiveHazards(&simulation),
                  SimulationCountStatus(&simulation, INCIDENT_RESOLVED),
                  SimulationCountStatus(&simulation, INCIDENT_FAILED),
                  arrivals > 0 ? TextFormat("%d/%d", onTime, arrivals) : "--"), 500, 47, 9,
@@ -1786,11 +2218,17 @@ int main(void)
         DrawHeaderService(&simulation, INCIDENT_ACCIDENT, 1135, "AMBULANCE", IncidentColor(INCIDENT_MEDICAL));
         DrawRectangleRounded((Rectangle){1300, 18, 272, 50}, 0.12f, 7,
                              (Color){17, 42, 60, 255});
-        DrawText(TextFormat("CARS %d  |  CITY %s", simulation.civilianCount,
-                 SimulationCityConditionName(simulation.cityCondition)),
-                 1315, 25, 10, (Color){179, 198, 211, 255});
-        DrawText(TextFormat("TRAFFIC  %s", SimulationTrafficLevelName(simulation.trafficLevel)),
-                 1315, 43, 12, RAYWHITE);
+        DrawText(TextFormat("TIME %05.1fs  |  CARS %d", simulation.elapsedTime,
+                 simulation.civilianCount), 1315, 24, 10, (Color){179, 198, 211, 255});
+        Color conditionColor = simulation.cityCondition == CITY_FOG ?
+                               (Color){184, 202, 214, 255} :
+                               simulation.cityCondition == CITY_RAIN ?
+                               (Color){97, 184, 226, 255} :
+                               (Color){113, 204, 156, 255};
+        DrawText(TextFormat("%s  |  TRAFFIC %s",
+                 SimulationCityConditionName(simulation.cityCondition),
+                 SimulationTrafficLevelName(simulation.trafficLevel)),
+                 1315, 43, 10, conditionColor);
 
         DrawIncidentQueue(&simulation, queueOrder, queueCount, selectedCall);
         DrawPanel(mapPanel);
@@ -1824,7 +2262,7 @@ int main(void)
         DrawPanel((Rectangle){18, 818, 1564, 68});
         DrawText("SIMULATION CONTROLS", 34, 833, 13,
                  (Color){132, 194, 225, 255});
-        DrawText("1-4 caller report | SPACE pause | S slow | F fast | N step",
+        DrawText("A serious fire drill | SHIFT+A minor | 1-4 report | SPACE pause | S slow | F fast | N step",
                  34, 853, 9, (Color){158, 180, 193, 255});
         DrawText("T traffic | W weather | C compare | M queue | R reset",
                  34, 868, 9, (Color){158, 180, 193, 255});
@@ -1843,7 +2281,7 @@ int main(void)
             !simulation.calls[selectedCall].dispatched) {
             int incidentIndex = CallIncidentIndex(&simulation, selectedCall);
             if (incidentIndex >= 0 && incidentIndex < simulation.incidentCount) {
-                int remaining = simulation.incidents[incidentIndex].requiredUnits -
+                int remaining = CountRequiredUnits(&simulation.incidents[incidentIndex]) -
                                 CountAssignedUnits(&simulation, incidentIndex);
                 dispatchReady = remaining > 0 && CountSelectedVehicles(selectedVehicleMask) == remaining;
             }
@@ -1872,7 +2310,7 @@ int main(void)
             Color noticeColor = operatorNoticeMatched ? (Color){24, 119, 83, 248} :
                                 (Color){145, 49, 57, 248};
             DrawRectangleRounded((Rectangle){425, 96, 750, 38}, 0.18f, 8, noticeColor);
-            int noticeWidth = MeasureText(operatorNotice, 12);
+            int noticeWidth = MeasureUiText(operatorNotice, 12);
             DrawText(operatorNotice, 800 - noticeWidth / 2, 109, 12, RAYWHITE);
         }
 
@@ -1892,6 +2330,7 @@ int main(void)
 
 
     UnloadRenderTexture(uiCanvas);
+    UnloadUiFont();
     CloseWindow();
 
     return 0;

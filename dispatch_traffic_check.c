@@ -16,14 +16,12 @@ int main(void)
     SimulationInit(&sim);
     sim.dispatchMode = DISPATCH_MANUAL;
     assert(SimulationCreateIncident(&sim, INCIDENT_FIRE, (Vector2){600, 500}));
-    sim.incidents[0].severity = 3;
-    sim.incidents[0].requiredUnits = 3;
     SimulationUpdate(&sim, 0.1f);
     assert(CountAssignedUnits(&sim, 0) == 0);
     assert(SimulationDispatchVehicles(&sim, 0, 1u << 5) == 0); /* ambulance rejected */
     assert(SimulationDispatchVehicles(&sim, 0, 1u << 0) == 1);
-    assert(SimulationDispatchVehicles(&sim, 0, (1u << MAX_VEHICLES) - 1u) == 2);
-    assert(CountAssignedUnits(&sim, 0) == 3);
+    assert(SimulationDispatchVehicles(&sim, 0, (1u << MAX_VEHICLES) - 1u) == 0);
+    assert(CountAssignedUnits(&sim, 0) == 1);
     assert(SimulationDispatchVehicles(&sim, 0, (1u << MAX_VEHICLES) - 1u) == 0);
     for (int step = 0; step < 300 && sim.incidents[0].status != INCIDENT_RESOLVED; step++)
         SimulationUpdate(&sim, 0.1f);

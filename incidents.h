@@ -13,6 +13,8 @@
 #define SIMULATION_EVENT_LENGTH 128
 #define MAX_CIVILIAN_CARS 24
 #define MAX_ROUTE_POINTS 16
+#define MAX_PEDESTRIANS 12
+#define MAX_PEDESTRIAN_ROUTE_POINTS 16
 
 typedef enum {
     INCIDENT_FIRE = 0,
@@ -26,8 +28,22 @@ typedef enum {
     INCIDENT_DISPATCHED,
     INCIDENT_RESPONDING,
     INCIDENT_RESOLVED,
-    INCIDENT_FAILED
+    INCIDENT_FAILED,
+    INCIDENT_SECURING,
+    INCIDENT_FIREFIGHTING,
+    INCIDENT_TREATING,
+    INCIDENT_TRANSPORTING
 } IncidentStatus;
+
+typedef enum {
+    PEDESTRIAN_WALKING = 0,
+    PEDESTRIAN_WAITING_TO_CROSS,
+    PEDESTRIAN_CROSSING,
+    PEDESTRIAN_EVACUATING,
+    PEDESTRIAN_BYSTANDING,
+    PEDESTRIAN_RESPECTING_CORDON,
+    PEDESTRIAN_YIELDING
+} PedestrianState;
 
 typedef enum {
     TRAFFIC_LIGHT = 0,
@@ -40,8 +56,18 @@ typedef enum {
     CITY_CLEAR = 0,
     CITY_RAIN,
     CITY_FOG,
+    CITY_WIND,
+    CITY_NIGHT,
     CITY_CONDITION_COUNT
 } CityCondition;
+
+typedef enum {
+    UNIT_AVAILABLE = 0,
+    UNIT_RESPONDING,
+    UNIT_ON_SCENE,
+    UNIT_TRANSPORTING,
+    UNIT_RETURNING
+} VehicleActivity;
 
 typedef struct {
     IncidentType type;
@@ -55,7 +81,20 @@ typedef struct {
     float workRequired;
     float deadline;
     int severity;
+    // requiredUnits remains the primary service count for compatibility.
     int requiredUnits;
+    int requiredUnitsByService[SERVICE_COUNT];
+    int totalRequiredUnits;
+    int needsSceneSecurity;
+    int requiresTransport;
+    int sceneSecured;
+    int primaryWorkComplete;
+    int patientCareComplete;
+    int transportComplete;
+    float fireRiskElapsed;
+    int fireSpreadOccurred;
+    int fireContained;
+    unsigned int pedestrianReactionMask;
     int responseRecorded;
     int callIndex;
 } Incident;
@@ -68,6 +107,8 @@ typedef struct {
     int available;
     int assignedIncident;
     int arrived;
+    VehicleActivity activity;
+    int patientDelivered;
     Vector2 route[MAX_ROUTE_POINTS];
     int routeCount;
     int routeIndex;
@@ -89,6 +130,21 @@ typedef struct {
     int sirenSource;
     int routeCursor;
 } CivilianCar;
+
+typedef struct {
+    Vector2 position;
+    float speed;
+    int sidewalk;
+    int direction;
+    int evacuating;
+    int reactionLogged;
+    PedestrianState state;
+    int behaviorIncident;
+    int routeIndex;
+    int targetNode;
+    int crossingActive;
+    float routeProgress;
+} Pedestrian;
 
 typedef struct {
     Vector2 location;

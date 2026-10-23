@@ -28,6 +28,11 @@ typedef struct {
     CityCondition cityCondition;
     CivilianCar civilianCars[MAX_CIVILIAN_CARS];
     int civilianCount;
+    Pedestrian pedestrians[MAX_PEDESTRIANS];
+    int pedestrianCount;
+    int apartmentFireDrill;
+    int evacuationEventLogged;
+    Vector2 hospitalPosition;
     EmergencyCall calls[MAX_CALLS];
     int callCount;
     float elapsedTime;
@@ -47,6 +52,8 @@ typedef struct {
 } StrategyComparison;
 
 void SimulationInit(Simulation *simulation);
+int SimulationStartApartmentFireDrill(Simulation *simulation);
+int SimulationStartApartmentFireDrillAtSeverity(Simulation *simulation, int severity);
 int SimulationCreateIncident(Simulation *simulation, IncidentType type, Vector2 position);
 int SimulationCreateCall(Simulation *simulation, Vector2 location, const char *report);
 int SimulationSetCallTruth(Simulation *simulation, int callIndex,
@@ -63,6 +70,11 @@ int GetRequiredUnits(IncidentType type, int severity);
 float SimulationIncidentPriority(const Incident *incident);
 int CountAssignedUnits(const Simulation *simulation, int incidentIndex);
 int CountArrivedUnits(const Simulation *simulation, int incidentIndex);
+int CountAssignedUnitsByService(const Simulation *simulation, int incidentIndex,
+                                IncidentType serviceType);
+int CountArrivedUnitsByService(const Simulation *simulation, int incidentIndex,
+                               IncidentType serviceType);
+int CountRequiredUnits(const Incident *incident);
 void SimulationUpdate(Simulation *simulation, float deltaTime);
 void SimulationSimulateQueue(Simulation *simulation);
 int SimulationCountStatus(const Simulation *simulation, IncidentStatus status);
