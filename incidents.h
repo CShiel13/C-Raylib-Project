@@ -15,6 +15,8 @@
 #define MAX_ROUTE_POINTS 16
 #define MAX_PEDESTRIANS 12
 #define MAX_PEDESTRIAN_ROUTE_POINTS 16
+#define APARTMENT_FIRE_ROOM_COUNT 6
+#define MAX_FIRE_CASCADE_BUILDINGS 6
 
 typedef enum {
     INCIDENT_FIRE = 0,
@@ -92,6 +94,10 @@ typedef struct {
     int patientCareComplete;
     int transportComplete;
     float fireRiskElapsed;
+    int fireRoomsBurning;
+    int fireBuildingIndex;
+    int fireCascadeStep;
+    int fireSpreadAttempted;
     int fireSpreadOccurred;
     int fireContained;
     unsigned int pedestrianReactionMask;
@@ -153,6 +159,8 @@ typedef struct {
     float dispatchedAt;
     IncidentType trueType;
     int trueSeverity;
+    int fireBuildingIndex;
+    int fireCascadeStep;
     IncidentType classifiedType;
     int severity;
     int classified;

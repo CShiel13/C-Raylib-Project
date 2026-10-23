@@ -110,11 +110,36 @@ static void CheckWaitingForSupportingUnit(void)
     assert(CountAssignedUnits(&sim, sim.calls[0].incidentIndex) == 5);
 }
 
+static void CheckApartmentFireFrontAndNeighborSpread(void)
+{
+    Simulation small;
+    SimulationInit(&small);
+    small.dispatchMode = DISPATCH_MANUAL;
+    assert(SimulationStartApartmentFireDrillAtSeverity(&small, 1));
+    assert(SimulationClassifyCall(&small, 0, INCIDENT_FIRE, 1));
+    Incident *smallFire = &small.incidents[small.calls[0].incidentIndex];
+    assert(smallFire->fireRoomsBurning == 1);
+    for (int i = 0; i < 42; i++) SimulationUpdate(&small, 0.1f);
+    assert(smallFire->fireRoomsBurning >= 2);
+    assert(!smallFire->fireSpreadOccurred);
+
+    Simulation critical;
+    SimulationInit(&critical);
+    critical.dispatchMode = DISPATCH_MANUAL;
+    assert(SimulationStartApartmentFireDrill(&critical));
+    assert(SimulationClassifyCall(&critical, 0, INCIDENT_FIRE, 3));
+    Incident *criticalFire = &critical.incidents[critical.calls[0].incidentIndex];
+    for (int i = 0; i < 61; i++) SimulationUpdate(&critical, 0.1f);
+    assert(criticalFire->fireRoomsBurning >= 3);
+    assert(criticalFire->fireSpreadOccurred);
+}
+
 int main(void)
 {
     CheckSeverityBasedRequirementsAndFireStages();
     CheckAmbulanceTransportAndManualServiceValidation();
     CheckWaitingForSupportingUnit();
-    puts("multi-stage response checks passed");
+    CheckApartmentFireFrontAndNeighborSpread();
+    puts("multi-stage response and progressive fire spread checks passed");
     return 0;
 }

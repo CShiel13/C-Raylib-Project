@@ -447,6 +447,8 @@ int GetRequiredUnits(IncidentType type, int severity)
 static void ConfigureIncidentRequirements(Incident *incident)
 {
     if (!incident) return;
+    if (incident->type == INCIDENT_FIRE && incident->fireRoomsBurning < 1)
+        incident->fireRoomsBurning = 1;
     memset(incident->requiredUnitsByService, 0, sizeof(incident->requiredUnitsByService));
     incident->requiredUnits = GetRequiredUnits(incident->type, incident->severity);
     IncidentType primaryService = SimulationServiceForIncident(incident->type);
@@ -700,6 +702,8 @@ void SimulationInit(Simulation *simulation)
     simulation->hospitalPosition = (Vector2){900, 550};
     simulation->apartmentFireDrill = 0;
     simulation->evacuationEventLogged = 0;
+    simulation->fireCascadeCount = 0;
+    simulation->fireCascadeLimitLogged = 0;
     simulation->callCount = 0;
     simulation->elapsedTime = 0.0f;
     simulation->eventCount = 0;
@@ -783,6 +787,9 @@ int SimulationStartApartmentFireDrillAtSeverity(Simulation *simulation, int seve
                         "Small fire reported in one apartment unit; residents are evacuating.";
     if (!SimulationCreateCall(simulation, (Vector2){624, 131}, report)) return 0;
     int callIndex = simulation->callCount - 1;
+    simulation->calls[callIndex].fireBuildingIndex = 4;
+    simulation->calls[callIndex].fireCascadeStep = 0;
+    simulation->fireCascadeCount = 1;
     SimulationSetCallTruth(simulation, callIndex, INCIDENT_FIRE, severity);
     LogEvent(simulation, severity >= 3 ?
              "Apartment fire drill started at high severity; fire, police and EMS response may be needed." :
@@ -1084,6 +1091,8 @@ int SimulationCreateIncident(Simulation *simulation, IncidentType type, Vector2 
 
     in->type = type;
     in->callIndex = -1;
+    in->fireBuildingIndex = -1;
+    in->fireCascadeStep = -1;
 
     in->status = INCIDENT_PENDING;
 
@@ -1116,6 +1125,8 @@ int SimulationCreateCall(Simulation *simulation, Vector2 location, const char *r
     call->location = location;
     call->receivedAt = simulation->elapsedTime;
     call->classifiedType = INCIDENT_FIRE;
+    call->fireBuildingIndex = -1;
+    call->fireCascadeStep = -1;
     call->incidentIndex = -1;
     snprintf(call->report, sizeof(call->report), "%s", report);
     ClassifyCallFromReport(call, &call->trueType, &call->trueSeverity);
@@ -1157,6 +1168,8 @@ int SimulationClassifyCall(Simulation *simulation, int callIndex,
         call->incidentIndex = simulation->incidentCount - 1;
         incident = &simulation->incidents[call->incidentIndex];
         incident->callIndex = callIndex;
+        incident->fireBuildingIndex = call->fireBuildingIndex;
+        incident->fireCascadeStep = call->fireCascadeStep;
         incident->ageTime = fmaxf(0.0f, simulation->elapsedTime - call->receivedAt);
         incident->waitTime = incident->ageTime;
         call->classifiedAt = simulation->elapsedTime;
@@ -1589,19 +1602,87 @@ static void ResolveIncident(Simulation *simulation, int incidentIndex)
     ReleaseIncidentVehicles(simulation, incidentIndex);
 }
 
+static const int apartmentFireBlockBuildings[MAX_FIRE_CASCADE_BUILDINGS] = {4, 6, 14, 13, 5, 3};
+static const Vector2 apartmentFireBlockPositions[MAX_FIRE_CASCADE_BUILDINGS] = {
+    {624, 131}, {663, 208}, {636, 430}, {518, 428}, {481, 210}, {508, 135}
+};
+
+static void SpreadApartmentFireToNextBuilding(Simulation *simulation, Incident *source)
+{
+    if (!simulation || !source || source->fireSpreadAttempted) return;
+    source->fireSpreadAttempted = 1;
+    source->fireSpreadOccurred = 1;
+
+    int nextStep = source->fireCascadeStep + 1;
+    if (nextStep < 1 || nextStep >= MAX_FIRE_CASCADE_BUILDINGS ||
+        simulation->fireCascadeCount >= MAX_FIRE_CASCADE_BUILDINGS) {
+        if (!simulation->fireCascadeLimitLogged) {
+            LogEvent(simulation, "Fire crews are protecting the rest of the block; spread limit reached.");
+            simulation->fireCascadeLimitLogged = 1;
+        }
+        return;
+    }
+
+    char report[CALL_REPORT_LENGTH];
+    snprintf(report, sizeof(report),
+             "Fire spreading to a neighboring building; flames are spreading and people may be trapped.");
+    if (!SimulationCreateCall(simulation, apartmentFireBlockPositions[nextStep], report)) {
+        LogEvent(simulation, "The block fire could not create another call because the call queue is full.");
+        return;
+    }
+
+    int callIndex = simulation->callCount - 1;
+    EmergencyCall *call = &simulation->calls[callIndex];
+    call->fireBuildingIndex = apartmentFireBlockBuildings[nextStep];
+    call->fireCascadeStep = nextStep;
+    SimulationSetCallTruth(simulation, callIndex, INCIDENT_FIRE, 3);
+    if (simulation->dispatchMode == DISPATCH_AUTOMATIC)
+        call->overridePending = 1;
+    simulation->fireCascadeCount++;
+
+    char message[SIMULATION_EVENT_LENGTH];
+    snprintf(message, sizeof(message),
+             "Fire spread to neighboring building %d; a new high-severity call was created.",
+             simulation->fireCascadeCount);
+    LogEvent(simulation, message);
+}
+
 static void UpdateIncidentResponseStage(Simulation *simulation, int incidentIndex,
                                         float deltaTime)
 {
     Incident *incident = &simulation->incidents[incidentIndex];
     if (incident->status == INCIDENT_RESOLVED || incident->status == INCIDENT_FAILED) return;
 
-    if (incident->type == INCIDENT_FIRE && incident->severity >= 3 &&
-        simulation->cityCondition == CITY_WIND && !incident->fireContained &&
+    if (simulation->apartmentFireDrill && incident->fireBuildingIndex >= 0 &&
+        incident->fireCascadeStep >= 0 &&
+        incident->type == INCIDENT_FIRE && !incident->fireContained &&
         !incident->primaryWorkComplete) {
         incident->fireRiskElapsed += deltaTime;
-        if (incident->fireRiskElapsed >= 6.0f && !incident->fireSpreadOccurred) {
-            incident->fireSpreadOccurred = 1;
-            LogEvent(simulation, "Wind carried the apartment fire to a neighboring block.");
+
+        // Track a simple six-room fire front. Severity and wind determine how
+        // quickly it advances; the visual state is driven by the same count.
+        float roomSpreadInterval = incident->severity >= 3 ? 2.6f :
+                                   incident->severity == 2 ? 3.2f : 4.0f;
+        if (simulation->cityCondition == CITY_WIND) roomSpreadInterval *= 0.78f;
+        int roomsReached = 1 + (int)(incident->fireRiskElapsed / roomSpreadInterval);
+        if (roomsReached > APARTMENT_FIRE_ROOM_COUNT)
+            roomsReached = APARTMENT_FIRE_ROOM_COUNT;
+        while (incident->fireRoomsBurning < roomsReached) {
+            incident->fireRoomsBurning++;
+            char message[SIMULATION_EVENT_LENGTH];
+            snprintf(message, sizeof(message), "Apartment fire spread to room %d of %d.",
+                     incident->fireRoomsBurning, APARTMENT_FIRE_ROOM_COUNT);
+            LogEvent(simulation, message);
+        }
+
+        // Neighboring buildings are only threatened by a critical fire that
+        // remains uncontrolled. Wind makes that danger develop sooner.
+        float neighborSpreadTime = simulation->cityCondition == CITY_WIND ? 6.0f : 12.0f;
+        int neighborThresholdRooms = simulation->cityCondition == CITY_WIND ? 3 : 5;
+        if (incident->severity >= 3 && !incident->fireSpreadAttempted &&
+            incident->fireRoomsBurning >= neighborThresholdRooms &&
+            incident->fireRiskElapsed >= neighborSpreadTime) {
+            SpreadApartmentFireToNextBuilding(simulation, incident);
         }
     }
 

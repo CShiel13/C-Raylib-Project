@@ -627,8 +627,56 @@ static void DrawCity(const Simulation *simulation)
         DrawCityBuilding(buildings[i], i);
         if (simulation->apartmentFireDrill && i == 4) {
             const Incident *fire = simulation->incidentCount ? &simulation->incidents[0] : NULL;
+            const EmergencyCall *waitingFireCall = NULL;
             DrawText("APARTMENT BLOCK", (int)buildings[i].x + 7,
                      (int)buildings[i].y + 5, 6, (Color){139, 196, 219, 255});
+            if (!fire && simulation->callCount > 0 &&
+                simulation->calls[0].trueType == INCIDENT_FIRE &&
+                simulation->calls[0].incidentIndex < 0)
+                waitingFireCall = &simulation->calls[0];
+            if (waitingFireCall) {
+                int litWindows = waitingFireCall->trueSeverity * 2;
+                for (int room = 0; room < litWindows; room++) {
+                    int col = room % 3;
+                    int row = room / 3;
+                    Rectangle window = {buildings[i].x + 13 + col * 32,
+                                        buildings[i].y + 22 + row * 14, 18, 9};
+                    float flicker = 0.5f + 0.5f * sinf(simulation->elapsedTime * 8.0f + room);
+                    DrawRectangleRounded(window, 0.12f, 3,
+                        (Color){(unsigned char)(190 + flicker * 65.0f),
+                                (unsigned char)(68 + flicker * 72.0f), 20, 255});
+                }
+                DrawText("NEW FIRE CALL", (int)buildings[i].x + 6,
+                         (int)buildings[i].y + 53, 6, ORANGE);
+            }
+            if (fire && fire->type == INCIDENT_FIRE) {
+                int rooms = fire->fireRoomsBurning;
+                if (rooms < 1) rooms = 1;
+                if (rooms > APARTMENT_FIRE_ROOM_COUNT) rooms = APARTMENT_FIRE_ROOM_COUNT;
+                for (int room = 0; room < APARTMENT_FIRE_ROOM_COUNT; room++) {
+                    int col = room % 3;
+                    int row = room / 3;
+                    Rectangle window = {buildings[i].x + 13 + col * 32,
+                                        buildings[i].y + 22 + row * 14, 18, 9};
+                    if (fire->status == INCIDENT_RESOLVED && room < rooms) {
+                        DrawRectangleRounded(window, 0.12f, 3, (Color){35, 33, 31, 255});
+                        continue;
+                    }
+                    if (room >= rooms || fire->fireContained || IsIncidentFinished(fire))
+                        continue;
+                    float flicker = 0.5f + 0.5f * sinf(simulation->elapsedTime * 8.0f + room * 1.7f);
+                    DrawRectangleRounded(window, 0.12f, 3,
+                        (Color){(unsigned char)(190 + flicker * 65.0f),
+                                (unsigned char)(68 + flicker * 72.0f), 20, 255});
+                    DrawRectangle((int)window.x + 5, (int)window.y + 2, 8, 4,
+                                  (Color){255, 221, 127, 230});
+                }
+                if (!IsIncidentFinished(fire))
+                    DrawText(TextFormat("FIRE FRONT  %d / %d ROOMS", rooms,
+                                        APARTMENT_FIRE_ROOM_COUNT),
+                             (int)buildings[i].x + 6, (int)buildings[i].y + 53,
+                             6, fire->fireContained ? GREEN : ORANGE);
+            }
             if (fire && fire->status == INCIDENT_RESOLVED) {
                 DrawRectangle((int)buildings[i].x + 5, (int)buildings[i].y + 5,
                               (int)buildings[i].width - 10, (int)buildings[i].height - 10,
@@ -640,13 +688,64 @@ static void DrawCity(const Simulation *simulation)
                          (int)buildings[i].y + 37, 7, (Color){230, 173, 110, 255});
             }
         }
-        if (simulation->apartmentFireDrill && i == 7 && simulation->incidentCount > 0 &&
-            simulation->incidents[0].fireSpreadOccurred) {
-            DrawRectangleLinesEx(buildings[i], 2.0f,
-                simulation->incidents[0].fireContained ? GREEN : ORANGE);
-            DrawText(simulation->incidents[0].fireContained ? "FIRE CONTAINED" : "THREATENED",
-                     (int)buildings[i].x + 8, (int)buildings[i].y + buildings[i].height - 14,
-                     7, simulation->incidents[0].fireContained ? GREEN : ORANGE);
+        if (simulation->apartmentFireDrill && i != 4) {
+            const Incident *fire = NULL;
+            for (int fireIndex = 0; fireIndex < simulation->incidentCount; fireIndex++) {
+                const Incident *candidate = &simulation->incidents[fireIndex];
+                if (candidate->type == INCIDENT_FIRE && candidate->fireBuildingIndex == i) {
+                    fire = candidate;
+                    break;
+                }
+            }
+            const EmergencyCall *waitingFireCall = NULL;
+            if (!fire) {
+                for (int callIndex = 0; callIndex < simulation->callCount; callIndex++) {
+                    const EmergencyCall *candidate = &simulation->calls[callIndex];
+                    if (candidate->trueType == INCIDENT_FIRE &&
+                        candidate->fireBuildingIndex == i &&
+                        (candidate->incidentIndex < 0 ||
+                         !IsIncidentFinished(&simulation->incidents[candidate->incidentIndex]))) {
+                        waitingFireCall = candidate;
+                        break;
+                    }
+                }
+            }
+            if (waitingFireCall) {
+                DrawRectangleLinesEx(buildings[i], 2.0f, ORANGE);
+                float flicker = 4.0f + 2.0f * sinf(simulation->elapsedTime * 7.0f + i);
+                for (int flame = 0; flame < 3; flame++) {
+                    float x = buildings[i].x + 8.0f + flame * 14.0f;
+                    float y = buildings[i].y + 15.0f + (flame % 2) * 14.0f;
+                    DrawTriangle((Vector2){x + 4, y - flicker}, (Vector2){x, y + 4},
+                                 (Vector2){x + 8, y + 4}, ORANGE);
+                }
+                DrawText("NEW FIRE CALL", (int)buildings[i].x + 3,
+                         (int)buildings[i].y + buildings[i].height - 10, 5, ORANGE);
+            }
+            if (fire && fire->status == INCIDENT_RESOLVED) {
+                DrawRectangle((int)buildings[i].x + 4, (int)buildings[i].y + 4,
+                              (int)buildings[i].width - 8, (int)buildings[i].height - 8,
+                              (Color){28, 27, 26, 125});
+                DrawText("DAMAGE", (int)buildings[i].x + 5,
+                         (int)buildings[i].y + buildings[i].height - 10,
+                         5, (Color){230, 173, 110, 255});
+            } else if (fire && !IsIncidentFinished(fire) && !fire->fireContained) {
+                DrawRectangleLinesEx(buildings[i], 2.0f, ORANGE);
+                float flicker = 4.0f + 2.5f * sinf(simulation->elapsedTime * 7.0f + i);
+                int flames = fire->severity >= 3 ? 3 : fire->severity + 1;
+                for (int room = 0; room < flames; room++) {
+                    float x = buildings[i].x + 8.0f + room * 14.0f;
+                    float y = buildings[i].y + 15.0f + (room % 2) * 14.0f;
+                    DrawTriangle((Vector2){x + 4, y - flicker},
+                                 (Vector2){x, y + 4}, (Vector2){x + 8, y + 4}, ORANGE);
+                }
+                DrawText("SPREAD FIRE", (int)buildings[i].x + 4,
+                         (int)buildings[i].y + buildings[i].height - 10, 5, ORANGE);
+            } else if (fire && !IsIncidentFinished(fire)) {
+                DrawRectangleLinesEx(buildings[i], 2.0f, GREEN);
+                DrawText("CONTAINED", (int)buildings[i].x + 3,
+                         (int)buildings[i].y + buildings[i].height - 10, 5, GREEN);
+            }
         }
     }
 
@@ -1650,16 +1749,6 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
                             CountArrivedUnits(simulation, i), CountRequiredUnits(incident)),
                  (int)incident->position.x + 12, (int)incident->position.y - 8, 10, color);
     }
-    if (simulation->apartmentFireDrill && simulation->incidentCount > 0 &&
-        simulation->incidents[0].fireSpreadOccurred &&
-        !IsIncidentFinished(&simulation->incidents[0])) {
-        Vector2 nearby = {883, 163};
-        float flicker = 6.0f + 2.5f * sinf(simulation->elapsedTime * 7.0f);
-        DrawTriangle((Vector2){nearby.x, nearby.y - flicker},
-                     (Vector2){nearby.x - 5, nearby.y + 5},
-                     (Vector2){nearby.x + 5, nearby.y + 5}, ORANGE);
-        DrawCircle((int)nearby.x - 3, (int)nearby.y - 14, 4, (Color){150, 161, 166, 100});
-    }
     for (int i = 0; i < simulation->callCount; i++) {
         const EmergencyCall *call = &simulation->calls[i];
         if (call->incidentIndex >= 0) continue;
@@ -2179,6 +2268,10 @@ int main(void)
             float speedMultiplier = fastForward ? 8.0f : slowMotion ? 0.25f : 1.0f;
             SimulationUpdate(&simulation, GetFrameTime() * speedMultiplier);
         }
+        // A cascade call can be created inside SimulationUpdate. Start its
+        // AUTO OP override modal immediately after that update, before drawing.
+        StartPendingOverrideModal(&simulation, &paused, &overrideResumeWhenDone,
+                                  &overrideModalCall, &overrideModalDeadline);
         UpdateCallerFeedbackToast(&simulation, operatorNotice, sizeof(operatorNotice),
                                   &operatorNoticeMatched, &operatorNoticeUntil);
 

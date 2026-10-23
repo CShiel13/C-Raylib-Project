@@ -31,6 +31,8 @@ typedef struct {
     Pedestrian pedestrians[MAX_PEDESTRIANS];
     int pedestrianCount;
     int apartmentFireDrill;
+    int fireCascadeCount;
+    int fireCascadeLimitLogged;
     int evacuationEventLogged;
     Vector2 hospitalPosition;
     EmergencyCall calls[MAX_CALLS];
