@@ -5,9 +5,15 @@
 #include "simulation.h"
 #include "ui_layout.h"
 #include "manual_selection.h"
+#include "manual_dispatch.h"
+#include "response_selection.h"
+#include "response_camera.h"
+#include "city_layout.h"
+#include "street_color.h"
 
 #include <stdio.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 
@@ -17,8 +23,8 @@
 #define UI_WIDTH 1600
 #define UI_HEIGHT 900
 #define UI_RENDER_SCALE 2
-#define CITY_WIDTH 1100
-#define CITY_HEIGHT 700
+#define CITY_WIDTH CITY_LAYOUT_WIDTH
+#define CITY_HEIGHT CITY_LAYOUT_HEIGHT
 #define QUEUE_VISIBLE 8
 
 typedef enum {
@@ -32,8 +38,52 @@ static const Rectangle queuePanel = {18, 104, 270, 700};
 static const Rectangle mapPanel = {300, 104, 930, 700};
 static const Rectangle detailsPanel = {1242, 104, 340, 700};
 static const Rectangle mapClip = {310, 150, 910, 642};
+static const Rectangle responseViewButton = {1038, 111, 174, 30};
+static const Rectangle responsePreviousButton = {795, 746, 58, 30};
+static const Rectangle responseNextButton = {900, 746, 58, 30};
+static const Rectangle responseCameraButton = {962, 746, 148, 30};
+static const Rectangle responseCameraResetButton = {1116, 746, 96, 30};
+static Rectangle ResponseUnitRowBounds(int row)
+{
+    return (Rectangle){mapClip.x + 12, mapClip.y + 13 + row * 29, 226, 25};
+}
 static const float queueRowsY = 158.0f;
 static const float queueRowHeight = 77.0f;
+
+static void DrawStreetOrientedBox(Vector3 center, Vector3 forward,
+                                  float length, float height, float width,
+                                  Color color);
+
+static int HospitalArrivalSlotForVehicle(const Simulation *simulation, int vehicleIndex,
+                                         Vector2 *slot)
+{
+    if (!simulation || vehicleIndex < 0 || vehicleIndex >= simulation->vehicleCount)
+        return 0;
+    const Vehicle *vehicle = &simulation->vehicles[vehicleIndex];
+    if (vehicle->serviceType != INCIDENT_ACCIDENT ||
+        fabsf(vehicle->position.x - CITY_LAYOUT_HOSPITAL_ENTRANCE.x) > 0.5f ||
+        fabsf(vehicle->position.y - CITY_LAYOUT_HOSPITAL_ENTRANCE.y) > 0.5f) return 0;
+
+    int rank = 0;
+    int count = 0;
+    for (int i = 0; i < simulation->vehicleCount; i++) {
+        const Vehicle *other = &simulation->vehicles[i];
+        if (other->serviceType != INCIDENT_ACCIDENT ||
+            fabsf(other->position.x - CITY_LAYOUT_HOSPITAL_ENTRANCE.x) > 0.5f ||
+            fabsf(other->position.y - CITY_LAYOUT_HOSPITAL_ENTRANCE.y) > 0.5f) continue;
+        if (i < vehicleIndex) rank++;
+        count++;
+    }
+    if (slot) *slot = CityLayoutHospitalArrivalSlot(rank, count);
+    return 1;
+}
+
+static Vector2 MapVehicleDisplayPosition(const Simulation *simulation, int vehicleIndex)
+{
+    Vector2 slot;
+    if (HospitalArrivalSlotForVehicle(simulation, vehicleIndex, &slot)) return slot;
+    return simulation->vehicles[vehicleIndex].position;
+}
 
 static const Rectangle compareButton = {332, 830, 76, 44};
 static const Rectangle pauseButton = {416, 830, 72, 44};
@@ -115,9 +165,20 @@ static void UnloadUiFont(void)
 }
 
 static int IsIncidentFinished(const Incident *incident);
+static int CallIncidentIndex(const Simulation *simulation, int callIndex);
 static int DrawWrappedText(const char *text, int x, int y, int fontSize,
                            int maxCharacters, int lineHeight, Color color);
 static const char *PriorityLabel(int severity);
+
+static int SelectedResponseIncident(const Simulation *simulation, int selectedCall,
+                                    int selectedIncident)
+{
+    if (selectedIncident >= 0 && selectedIncident < simulation->incidentCount)
+        return selectedIncident;
+    int callIncident = CallIncidentIndex(simulation, selectedCall);
+    return callIncident >= 0 && callIncident < simulation->incidentCount ? callIncident : -1;
+}
+
 static void DrawButton(Rectangle rect, const char *label, Color color);
 static void DrawPanel(Rectangle rect);
 
@@ -355,6 +416,16 @@ static void DrawActiveIncidentEffect(const Incident *incident, int index, float 
     }
 }
 
+// Stable per-particle seeds keep weather repeatable without growing arrays or
+// allocating anything in the frame loop.
+static float WeatherSeed(unsigned int index, unsigned int salt)
+{
+    unsigned int value = index * 374761393u + salt * 668265263u + 0x9e3779b9u;
+    value = (value ^ (value >> 13)) * 1274126177u;
+    value ^= value >> 16;
+    return (float)(value & 0x00ffffffu) / 16777215.0f;
+}
+
 static void DrawCityWeather(const Simulation *simulation)
 {
     if (simulation->cityCondition == CITY_NIGHT) {
@@ -365,18 +436,25 @@ static void DrawCityWeather(const Simulation *simulation)
             DrawCircle(x, y, 2.0f, (Color){255, 220, 123, 150});
         }
     } else if (simulation->cityCondition == CITY_FOG) {
-        DrawRectangle(0, 0, CITY_WIDTH, CITY_HEIGHT, (Color){196, 211, 218, 34});
+        // A few thin, low-alpha ground-hugging bands suggest fog on the 2D map
+        // without bleaching incidents, buildings, or vehicles.
         for (int band = 0; band < 4; band++) {
-            float y = 90.0f + band * 157.0f + sinf(simulation->elapsedTime * 0.35f + band) * 12.0f;
-            DrawRectangle(0, (int)y, CITY_WIDTH, 48, (Color){201, 216, 221, 16});
+            float y = 125.0f + band * 151.0f +
+                      sinf(simulation->elapsedTime * 0.22f + (float)band) * 8.0f;
+            DrawRectangle(0, (int)y, CITY_WIDTH, 14,
+                          (Color){173, 194, 203, 12});
         }
     } else if (simulation->cityCondition == CITY_RAIN) {
-        for (int drop = 0; drop < 82; drop++) {
-            float x = (float)((drop * 97 + 29) % CITY_WIDTH);
-            float y = fmodf((float)((drop * 53) % CITY_HEIGHT) + simulation->elapsedTime * 92.0f,
-                            (float)CITY_HEIGHT);
-            DrawLineEx((Vector2){x, y}, (Vector2){x - 5.0f, y + 10.0f}, 1.1f,
-                       (Color){127, 190, 225, 105});
+        for (unsigned int drop = 0; drop < 82; drop++) {
+            float x = WeatherSeed(drop, 1u) * (float)CITY_WIDTH;
+            float y = fmodf(WeatherSeed(drop, 2u) * (float)CITY_HEIGHT +
+                            simulation->elapsedTime * 92.0f, (float)CITY_HEIGHT);
+            // Dark edge plus bright core keeps the streak visible on both
+            // pale roofs and dark roads.
+            DrawLineEx((Vector2){x, y}, (Vector2){x - 5.0f, y + 10.0f}, 2.0f,
+                       (Color){19, 42, 57, 115});
+            DrawLineEx((Vector2){x + 0.6f, y}, (Vector2){x - 4.4f, y + 10.0f},
+                       0.9f, (Color){220, 238, 248, 210});
         }
     } else if (simulation->cityCondition == CITY_WIND) {
         for (int streak = 0; streak < 8; streak++) {
@@ -384,7 +462,21 @@ static void DrawCityWeather(const Simulation *simulation)
             int x = (int)fmodf((float)(streak * 127) + simulation->elapsedTime * 30.0f,
                                (float)CITY_WIDTH);
             DrawLineEx((Vector2){(float)x, (float)y}, (Vector2){(float)x + 22.0f, (float)y - 2.0f},
-                       1.0f, (Color){141, 194, 220, 75});
+                       1.4f, (Color){171, 211, 229, 150});
+        }
+    } else if (simulation->cityCondition == CITY_SNOW) {
+        for (unsigned int flake = 0; flake < 58; flake++) {
+            float seedX = WeatherSeed(flake, 3u);
+            float x = fmodf(seedX * (float)CITY_WIDTH +
+                            sinf(simulation->elapsedTime * 0.9f + (float)flake) * 7.0f +
+                            (float)CITY_WIDTH, (float)CITY_WIDTH);
+            float y = fmodf(WeatherSeed(flake, 4u) * (float)CITY_HEIGHT +
+                            simulation->elapsedTime * (15.0f + WeatherSeed(flake, 5u) * 9.0f),
+                            (float)CITY_HEIGHT);
+            float radius = 1.1f + WeatherSeed(flake, 6u) * 1.2f;
+            DrawCircle((int)x, (int)y, radius + 0.7f,
+                       (Color){26, 53, 70, 155});
+            DrawCircle((int)x, (int)y, radius, (Color){226, 240, 249, 225});
         }
     }
 }
@@ -549,6 +641,53 @@ static void DrawServiceLandmark(Rectangle r, const char *label, Color color)
     DrawText(label, (int)r.x + 4, (int)r.y + r.height - 11, 7, RAYWHITE);
 }
 
+static void DrawHospitalMapLandmark(void)
+{
+    Rectangle bay = CITY_LAYOUT_HOSPITAL_BAY;
+    Rectangle hospital = CITY_LAYOUT_HOSPITAL_FOOTPRINT;
+    DrawRectangleRec(bay, (Color){54, 71, 78, 255});
+    DrawRectangleLinesEx(bay, 1.5f, (Color){127, 157, 160, 255});
+    for (int stripe = 0; stripe < 3; stripe++) {
+        int y = (int)bay.y + 8 + stripe * 20;
+        DrawLineEx((Vector2){bay.x + 3, (float)y},
+                   (Vector2){bay.x + bay.width - 3, (float)y},
+                   1.3f, (Color){191, 206, 205, 210});
+    }
+    DrawLineEx(CITY_LAYOUT_ROAD_NODES[CITY_LAYOUT_HOSPITAL_ENTRANCE_NODE],
+               CITY_LAYOUT_HOSPITAL_ENTRANCE, 10.0f, (Color){68, 82, 91, 255});
+    DrawLineEx(CITY_LAYOUT_ROAD_NODES[CITY_LAYOUT_HOSPITAL_ENTRANCE_NODE],
+               CITY_LAYOUT_HOSPITAL_ENTRANCE, 1.2f, (Color){139, 151, 153, 220});
+
+    DrawRectangleRounded(hospital, 0.08f, 5, (Color){32, 61, 70, 255});
+    DrawRectangleRoundedLinesEx(hospital, 0.08f, 5, 1.6f,
+                                (Color){83, 210, 181, 255});
+    DrawRectangle((int)hospital.x + 5, (int)hospital.y + 5,
+                  (int)hospital.width - 10, 8, (Color){72, 103, 111, 255});
+    for (int window = 0; window < 3; window++)
+        DrawRectangle((int)hospital.x + 9 + window * 19,
+                      (int)hospital.y + 23, 12, 12,
+                      (Color){107, 173, 191, 255});
+
+    // Entrance faces the receiving apron at the footprint's east edge.
+    DrawRectangle((int)CITY_LAYOUT_HOSPITAL_DOOR.x - 4,
+                  (int)CITY_LAYOUT_HOSPITAL_DOOR.y - 8, 6, 16,
+                  (Color){213, 229, 225, 255});
+    DrawRectangle((int)CITY_LAYOUT_HOSPITAL_DOOR.x - 3,
+                  (int)CITY_LAYOUT_HOSPITAL_DOOR.y - 6, 3, 12,
+                  (Color){55, 99, 113, 255});
+    DrawRectangle((int)hospital.x + 9, (int)hospital.y + 39, 8, 14,
+                  (Color){226, 236, 231, 255});
+    DrawRectangle((int)hospital.x + 12, (int)hospital.y + 40, 2, 12, RED);
+    DrawRectangle((int)hospital.x + 10, (int)hospital.y + 45, 6, 2, RED);
+    DrawText("HOSPITAL", (int)hospital.x + 23,
+             (int)hospital.y + 41, 8, RAYWHITE);
+    DrawLineEx(CITY_LAYOUT_HOSPITAL_DOOR, CITY_LAYOUT_HOSPITAL_ENTRANCE,
+               2.0f, (Color){134, 219, 194, 255});
+    DrawCircleLines((int)CITY_LAYOUT_HOSPITAL_ENTRANCE.x,
+                    (int)CITY_LAYOUT_HOSPITAL_ENTRANCE.y, 5,
+                    (Color){128, 236, 203, 255});
+}
+
 static int CountOnSceneService(const Simulation *simulation, int incidentIndex,
                               IncidentType serviceType)
 {
@@ -582,12 +721,8 @@ static void DrawCity(const Simulation *simulation)
 {
     DrawRectangle(0, 0, CITY_WIDTH, CITY_HEIGHT, (Color){34, 53, 61, 255});
 
-    // Subtle urban blocks and service alleys; the driveable emergency route
-    // network remains the existing three connected arterial roads below.
-    for (int x = 20; x < CITY_WIDTH; x += 64)
-        DrawLine(x, 0, x, CITY_HEIGHT, (Color){55, 73, 78, 35});
-    for (int y = 20; y < CITY_HEIGHT; y += 64)
-        DrawLine(0, y, CITY_WIDTH, y, (Color){55, 73, 78, 35});
+    // Keep the neighborhood background quiet so road markings, routes, and
+    // incident symbols remain the strongest map signals.
 
     // Small green spaces, paths, and planted trees break up the built areas.
     DrawRectangleRounded((Rectangle){45, 56, 100, 72}, 0.08f, 6, (Color){36, 79, 64, 255});
@@ -614,15 +749,8 @@ static void DrawCity(const Simulation *simulation)
         DrawLine(65 + i * 28, 587, 65 + i * 28, 621, (Color){129, 145, 145, 150});
     }
 
-    const Rectangle buildings[] = {
-        {48,145,92,82}, {158,112,145,66}, {169,190,110,49},
-        {462,108,92,54}, {565,105,119,52}, {464,174,35,72}, {640,176,47,64},
-        {839,113,88,100}, {943,116,99,83}, {843,207,88,37},
-        {48,410,100,110}, {163,389,122,82}, {164,484,120,81},
-        {463,390,111,76}, {586,389,101,83}, {467,482,92,86}, {570,489,116,73},
-        {839,394,91,63}, {944,393,99,101}, {840,483,87,83}, {948,516,95,69}
-    };
-    const int buildingCount = (int)(sizeof(buildings) / sizeof(buildings[0]));
+    const Rectangle *buildings = CITY_LAYOUT_BUILDINGS;
+    const int buildingCount = CITY_LAYOUT_BUILDING_COUNT;
     for (int i = 0; i < buildingCount; i++) {
         DrawCityBuilding(buildings[i], i);
         if (simulation->apartmentFireDrill && i == 4) {
@@ -750,43 +878,81 @@ static void DrawCity(const Simulation *simulation)
     }
 
     // Minor access roads and sidewalks sit beneath the connected main roads.
-    DrawRectangle(0, 274, CITY_WIDTH, 16, (Color){87, 102, 105, 255});
-    DrawRectangle(0, 362, CITY_WIDTH, 16, (Color){87, 102, 105, 255});
-    DrawRectangle(339, 80, 16, 550, (Color){87, 102, 105, 255});
-    DrawRectangle(437, 80, 16, 550, (Color){87, 102, 105, 255});
-    DrawRectangle(714, 80, 16, 550, (Color){87, 102, 105, 255});
-    DrawRectangle(812, 80, 16, 550, (Color){87, 102, 105, 255});
+    for (int i = 0; i < CITY_LAYOUT_SIDEWALK_COUNT; i++) {
+        Rectangle sidewalk = CITY_LAYOUT_SIDEWALKS[i];
+        DrawRectangleRec(sidewalk, (Color){87, 102, 105, 255});
+    }
 
     // Main arterial geometry matches the road nodes and routing graph exactly.
-    DrawRectangle(0, 290, CITY_WIDTH, 72, (Color){68, 82, 91, 255});
-    DrawRectangle(355, 80, 82, 550, (Color){68, 82, 91, 255});
-    DrawRectangle(730, 80, 82, 550, (Color){68, 82, 91, 255});
-    DrawLine(0, 294, CITY_WIDTH, 294, (Color){139, 151, 153, 210});
-    DrawLine(0, 358, CITY_WIDTH, 358, (Color){139, 151, 153, 210});
-    DrawLine(359, 80, 359, 630, (Color){139, 151, 153, 210});
-    DrawLine(433, 80, 433, 630, (Color){139, 151, 153, 210});
-    DrawLine(734, 80, 734, 630, (Color){139, 151, 153, 210});
-    DrawLine(808, 80, 808, 630, (Color){139, 151, 153, 210});
+    for (int edge = 0; edge < CITY_LAYOUT_ROAD_EDGE_COUNT; edge++) {
+        Vector2 from = CITY_LAYOUT_ROAD_NODES[CITY_LAYOUT_ROAD_EDGES[edge].from];
+        Vector2 to = CITY_LAYOUT_ROAD_NODES[CITY_LAYOUT_ROAD_EDGES[edge].to];
+        float width = CityLayoutRoadWidth(edge);
+        DrawLineEx(from, to, width, (Color){68, 82, 91, 255});
+    }
+    Vector2 firstJunction = CITY_LAYOUT_ROAD_NODES[1];
+    Vector2 secondJunction = CITY_LAYOUT_ROAD_NODES[2];
+    DrawLine(0, (int)firstJunction.y - 32, CITY_WIDTH, (int)firstJunction.y - 32,
+             (Color){139, 151, 153, 210});
+    DrawLine(0, (int)firstJunction.y + 32, CITY_WIDTH, (int)firstJunction.y + 32,
+             (Color){139, 151, 153, 210});
+    DrawLine((int)firstJunction.x - 37, 80, (int)firstJunction.x - 37, 630,
+             (Color){139, 151, 153, 210});
+    DrawLine((int)firstJunction.x + 37, 80, (int)firstJunction.x + 37, 630,
+             (Color){139, 151, 153, 210});
+    DrawLine((int)secondJunction.x - 37, 80, (int)secondJunction.x - 37, 630,
+             (Color){139, 151, 153, 210});
+    DrawLine((int)secondJunction.x + 37, 80, (int)secondJunction.x + 37, 630,
+             (Color){139, 151, 153, 210});
+    Vector2 eastWardJunction = CITY_LAYOUT_ROAD_NODES[9];
+    DrawLine((int)eastWardJunction.x - 23, 80, (int)eastWardJunction.x - 23, 630,
+             (Color){139, 151, 153, 210});
+    DrawLine((int)eastWardJunction.x + 23, 80, (int)eastWardJunction.x + 23, 630,
+             (Color){139, 151, 153, 210});
 
     // Painted center lines distinguish opposing traffic directions.
     for (int x = 0; x < CITY_WIDTH; x += 40) {
-        if ((x >= 320 && x <= 440) || (x >= 695 && x <= 815)) continue;
-        DrawRectangle(x, 324, 23, 3, (Color){222, 190, 111, 235});
-        DrawRectangle(x, 329, 23, 2, (Color){222, 190, 111, 150});
+        if (abs(x - (int)firstJunction.x) <= 76 ||
+            abs(x - (int)secondJunction.x) <= 76) continue;
+        DrawRectangle(x, (int)firstJunction.y - 2, 23, 3, (Color){222, 190, 111, 235});
+        DrawRectangle(x, (int)firstJunction.y + 3, 23, 2, (Color){222, 190, 111, 150});
     }
     for (int y = 80; y < 630; y += 40) {
-        if (y >= 280 && y <= 360) continue;
-        DrawRectangle(394, y, 3, 23, (Color){222, 190, 111, 235});
-        DrawRectangle(399, y, 2, 23, (Color){222, 190, 111, 150});
-        DrawRectangle(769, y, 3, 23, (Color){222, 190, 111, 235});
-        DrawRectangle(774, y, 2, 23, (Color){222, 190, 111, 150});
+        if (abs(y - (int)firstJunction.y) <= 46) continue;
+        DrawRectangle((int)firstJunction.x - 2, y, 3, 23, (Color){222, 190, 111, 235});
+        DrawRectangle((int)firstJunction.x + 3, y, 2, 23, (Color){222, 190, 111, 150});
+        DrawRectangle((int)secondJunction.x - 2, y, 3, 23, (Color){222, 190, 111, 235});
+        DrawRectangle((int)secondJunction.x + 3, y, 2, 23, (Color){222, 190, 111, 150});
+        if (abs(y - (int)eastWardJunction.y) > 44) {
+            DrawRectangle((int)eastWardJunction.x - 2, y, 3, 23, (Color){222, 190, 111, 235});
+            DrawRectangle((int)eastWardJunction.x + 3, y, 2, 23, (Color){222, 190, 111, 150});
+        }
     }
 
     // Zebra crossings and stop bars clarify the two connected junctions.
-    DrawCrosswalkHorizontal(335, 293); DrawCrosswalkHorizontal(437, 293);
-    DrawCrosswalkHorizontal(710, 293); DrawCrosswalkHorizontal(812, 293);
-    DrawCrosswalkVertical(363, 262); DrawCrosswalkVertical(363, 363);
-    DrawCrosswalkVertical(738, 262); DrawCrosswalkVertical(738, 363);
+    // Crosswalk coordinates are also used by the Street View renderer.
+    for (int junction = 1; junction <= 2; junction++) {
+        Vector2 node = CITY_LAYOUT_ROAD_NODES[junction];
+        DrawCrosswalkHorizontal((int)node.x + CITY_LAYOUT_CROSSWALK_LEFT_OFFSET, 293);
+        DrawCrosswalkHorizontal((int)node.x + CITY_LAYOUT_CROSSWALK_RIGHT_OFFSET, 293);
+        DrawCrosswalkVertical((int)node.x - CITY_LAYOUT_CROSSWALK_HALF_WIDTH,
+                              (int)node.y + CITY_LAYOUT_CROSSWALK_UP_OFFSET);
+        DrawCrosswalkVertical((int)node.x - CITY_LAYOUT_CROSSWALK_HALF_WIDTH,
+                              (int)node.y + CITY_LAYOUT_CROSSWALK_DOWN_OFFSET);
+    }
+    // East Ward access junction and two marked pedestrian crossing points.
+    DrawCrosswalkHorizontal((int)eastWardJunction.x + CITY_LAYOUT_CROSSWALK_LEFT_OFFSET, 293);
+    for (int crossingY = 262; crossingY <= 350; crossingY += 88)
+        for (int stripe = 0; stripe < 5; stripe++)
+            DrawRectangle((int)eastWardJunction.x - 21, crossingY + stripe * 5,
+                          42, 3, (Color){203, 212, 209, 175});
+
+    // The short ambulance driveway joins the hospital receiving entrance to
+    // the existing East Ward road endpoint used by the route planner.
+    DrawLineEx(CITY_LAYOUT_ROAD_NODES[CITY_LAYOUT_HOSPITAL_ENTRANCE_NODE],
+               CITY_LAYOUT_HOSPITAL_ENTRANCE, 16.0f, (Color){68, 82, 91, 255});
+    DrawLineEx(CITY_LAYOUT_ROAD_NODES[CITY_LAYOUT_HOSPITAL_ENTRANCE_NODE],
+               CITY_LAYOUT_HOSPITAL_ENTRANCE, 1.5f, (Color){139, 151, 153, 220});
 
     // District labels and road names provide orientation without hiding units.
     DrawText("RIVERSIDE", 55, 245, 11, (Color){191, 207, 203, 235});
@@ -795,9 +961,9 @@ static void DrawCity(const Simulation *simulation)
     DrawText("WEST END", 55, 645, 11, (Color){191, 207, 203, 235});
     DrawText("CENTRAL", 493, 645, 11, (Color){191, 207, 203, 235});
     DrawText("PARK DISTRICT", 845, 645, 11, (Color){191, 207, 203, 235});
-    DrawServiceLandmark((Rectangle){240, 242, 54, 32}, "FIRE HQ", RED);
-    DrawServiceLandmark((Rectangle){590, 590, 62, 32}, "POLICE", BLUE);
-    DrawServiceLandmark((Rectangle){860, 490, 80, 58}, "HOSPITAL", (Color){91, 225, 182, 255});
+    DrawServiceLandmark(CITY_LAYOUT_FIRE_STATION, "FIRE HQ", RED);
+    DrawServiceLandmark(CITY_LAYOUT_POLICE_STATION, "POLICE", BLUE);
+    DrawHospitalMapLandmark();
 }
 
 static const char *IncidentTypeName(IncidentType type)
@@ -1028,6 +1194,26 @@ static void DrawPanel(Rectangle rect)
 {
     DrawRectangleRounded(rect, 0.04f, 12, (Color){11, 27, 43, 255});
     DrawRectangleRoundedLines(rect, 0.04f, 12, (Color){39, 73, 96, 255});
+    DrawLineEx((Vector2){rect.x + 14.0f, rect.y + 1.0f},
+               (Vector2){rect.x + rect.width - 14.0f, rect.y + 1.0f},
+               1.2f, (Color){45, 125, 165, 115});
+}
+
+static void DrawMapLegend(void)
+{
+    const int startX = 790;
+    const int y = 125;
+    DrawIncidentIcon(INCIDENT_FIRE, (Vector2){startX + 4, y}, 4.5f, IncidentColor(INCIDENT_FIRE));
+    DrawText("Fire", startX + 12, y - 5, 8, (Color){206, 218, 227, 255});
+    DrawVehicleIcon(INCIDENT_CRIME, (Vector2){startX + 55, y});
+    DrawText("Police", startX + 65, y - 5, 8, (Color){206, 218, 227, 255});
+    DrawVehicleIcon(INCIDENT_ACCIDENT, (Vector2){startX + 113, y});
+    DrawText("EMS", startX + 123, y - 5, 8, (Color){206, 218, 227, 255});
+    DrawLineEx((Vector2){startX + 160, y}, (Vector2){startX + 176, y},
+               2.0f, (Color){72, 181, 255, 235});
+    DrawText("Route", startX + 180, y - 5, 8, (Color){206, 218, 227, 255});
+    DrawCircleLines(startX + 224, y, 4, (Color){255, 188, 82, 255});
+    DrawText("Call", startX + 232, y - 5, 8, (Color){206, 218, 227, 255});
 }
 
 static int CountActiveForService(const Simulation *simulation, IncidentType service)
@@ -1331,6 +1517,8 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedCall,
         int incidentIndex = CallIncidentIndex(simulation, selectedCall);
         const Incident *incident = incidentIndex >= 0 && incidentIndex < simulation->incidentCount ?
                                    &simulation->incidents[incidentIndex] : NULL;
+        int manualSelectingUnits = simulation->dispatchMode == DISPATCH_MANUAL &&
+                                   ManualCallNeedsVehicleAssignment(simulation, selectedCall);
         int displaySeverity = call->classified ? call->severity : manualSeverity;
         DrawOperatorHandoff(call, selectedCall + 1, incident, simulation->dispatchMode);
         DrawRectangleRounded((Rectangle){1452, 117, 112, 25}, 0.22f, 6,
@@ -1401,8 +1589,9 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedCall,
             DrawText(TextFormat("RESPONSE STAGE  %s", IncidentStatusName(incident->status)),
                      1260, 302, 8, (Color){155, 185, 202, 255});
 
-            if (simulation->dispatchMode == DISPATCH_MANUAL && !call->dispatched) {
-                DrawText("SELECT SUITABLE UNITS  (all required before dispatch)",
+            if (manualSelectingUnits) {
+                DrawText(call->dispatched ? "SELECT ADDITIONAL UNITS  (incident escalated)" :
+                         "SELECT SUITABLE UNITS  (all required before dispatch)",
                          1260, 315, 9, (Color){107, 190, 238, 255});
                 int vehicleRows[MANUAL_VEHICLE_ROW_COUNT];
                 int rowCount = ManualVehicleRows(simulation, incident, vehicleRows);
@@ -1487,7 +1676,7 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedCall,
                              1260, 433, 8, ORANGE);
             }
 
-            int manualSelecting = simulation->dispatchMode == DISPATCH_MANUAL && !call->dispatched;
+            int manualSelecting = manualSelectingUnits;
             int timelineY = manualSelecting ? 504 : 480;
             float callToDispatch = call->dispatched ? call->dispatchedAt - call->receivedAt : -1.0f;
             DrawText(callToDispatch >= 0.0f ?
@@ -1554,6 +1743,1349 @@ static Vector2 MapCanvasToCity(Vector2 point, Rectangle cityView)
                      (point.y - cityView.y) * CITY_HEIGHT / cityView.height};
 }
 
+static Vector3 CityPointToStreetWorld(Vector2 point)
+{
+    return CityLayoutMapPointToStreet(point);
+}
+
+static Vector3 CityRectCenterToStreetWorld(Rectangle rect)
+{
+    return CityPointToStreetWorld((Vector2){rect.x + rect.width * 0.5f,
+                                            rect.y + rect.height * 0.5f});
+}
+
+static float CityPixelsToStreet(float pixels)
+{
+    return pixels * CITY_LAYOUT_STREET_SCALE;
+}
+
+static Vector3 KeepStreetPointInCity(Vector3 point)
+{
+    const float halfWidth = CITY_WIDTH * CITY_LAYOUT_STREET_SCALE * 0.5f - 0.35f;
+    const float halfDepth = CITY_HEIGHT * CITY_LAYOUT_STREET_SCALE * 0.5f - 0.35f;
+    if (point.x < -halfWidth) point.x = -halfWidth;
+    if (point.x > halfWidth) point.x = halfWidth;
+    if (point.z < -halfDepth) point.z = -halfDepth;
+    if (point.z > halfDepth) point.z = halfDepth;
+    return point;
+}
+
+static void DrawStreetRoadNetwork(CityCondition condition, Vector3 cameraPosition)
+{
+    // Keep these as untinted source colors. StreetDistanceColor applies the
+    // condition once, then (for fog) adds the distance haze separately.
+    const Color basePavement = (Color){68, 82, 91, 255};
+    const Color baseCurb = (Color){139, 151, 153, 220};
+    const Color baseLane = (Color){222, 190, 111, 235};
+    const float scale = CityPixelsToStreet(1.0f);
+
+    // Sidewalk/access bands use the exact rectangles painted by the 2D map.
+    for (int i = 0; i < CITY_LAYOUT_SIDEWALK_COUNT; i++) {
+        Rectangle r = CITY_LAYOUT_SIDEWALKS[i];
+        Vector3 center = CityRectCenterToStreetWorld(r);
+        DrawCubeV((Vector3){center.x,
+                           CITY_LAYOUT_SIDEWALK_SURFACE_Y - 0.035f,
+                           center.z},
+                  (Vector3){r.width * scale, 0.07f, r.height * scale},
+                  StreetDistanceColor((Color){87, 102, 105, 255}, center,
+                                      cameraPosition, condition));
+    }
+
+    // Generate the 3D road surfaces from the route planner's shared graph.
+    for (int i = 0; i < CITY_LAYOUT_ROAD_EDGE_COUNT; i++) {
+        CityRoadEdge edge = CITY_LAYOUT_ROAD_EDGES[i];
+        Vector2 a = CITY_LAYOUT_ROAD_NODES[edge.from];
+        Vector2 b = CITY_LAYOUT_ROAD_NODES[edge.to];
+        Vector3 wa = CityPointToStreetWorld(a);
+        Vector3 wb = CityPointToStreetWorld(b);
+        float length = (fabsf(b.x - a.x) + fabsf(b.y - a.y)) * scale;
+        int horizontal = fabsf(b.x - a.x) >= fabsf(b.y - a.y);
+        float roadWidth = CityPixelsToStreet(CityLayoutRoadWidth(i));
+        Vector3 center = {(wa.x + wb.x) * 0.5f, 0.025f, (wa.z + wb.z) * 0.5f};
+        Color pavement = StreetDistanceColor(basePavement, center, cameraPosition,
+                                             condition);
+        Color curb = StreetDistanceColor(baseCurb, center, cameraPosition, condition);
+        Color lane = StreetDistanceColor(baseLane, center, cameraPosition, condition);
+        DrawCubeV(center, horizontal ? (Vector3){length + 0.04f, 0.09f, roadWidth} :
+                                      (Vector3){roadWidth, 0.09f, length + 0.04f}, pavement);
+
+        // Cool, broken specular streaks sit on the road surface during rain.
+        // They are static geometry, so rain adds no traffic or simulation work.
+        if (condition == CITY_RAIN) {
+            Color wetSheen = StreetDistanceColor((Color){127, 173, 190, 120},
+                                                center, cameraPosition, condition);
+            float sheenLength = CityPixelsToStreet(12.0f);
+            float sheenGap = CityPixelsToStreet(28.0f);
+            for (float along = CityPixelsToStreet(26.0f); along < length - CityPixelsToStreet(22.0f);
+                 along += sheenLength + sheenGap) {
+                Vector3 from = center, to = center;
+                if (horizontal) {
+                    float sign = wb.x >= wa.x ? 1.0f : -1.0f;
+                    from.x = wa.x + sign * along;
+                    to.x = wa.x + sign * (along + sheenLength);
+                    from.z += roadWidth * 0.25f;
+                    to.z += roadWidth * 0.25f;
+                } else {
+                    float sign = wb.z >= wa.z ? 1.0f : -1.0f;
+                    from.z = wa.z + sign * along;
+                    to.z = wa.z + sign * (along + sheenLength);
+                    from.x += roadWidth * 0.25f;
+                    to.x += roadWidth * 0.25f;
+                }
+                from.y = to.y = 0.079f;
+                DrawLine3D(from, to, wetSheen);
+            }
+        }
+
+        // Paired dashed center paint mirrors the opposing lanes in the 2D map.
+        float dashLength = CityPixelsToStreet(23.0f);
+        float gap = CityPixelsToStreet(17.0f);
+        float offset = CityPixelsToStreet(2.5f);
+        for (float along = CityPixelsToStreet(20.0f); along < length - CityPixelsToStreet(20.0f);
+             along += dashLength + gap) {
+            float end = fminf(along + dashLength,
+                              length - CityPixelsToStreet(15.0f));
+            for (int side = -1; side <= 1; side += 2) {
+                Vector3 from = center, to = center;
+                if (horizontal) {
+                    float sign = wb.x >= wa.x ? 1.0f : -1.0f;
+                    from.x = wa.x + sign * along;
+                    to.x = wa.x + sign * end;
+                    from.z += (float)side * offset;
+                    to.z += (float)side * offset;
+                } else {
+                    float sign = wb.z >= wa.z ? 1.0f : -1.0f;
+                    from.z = wa.z + sign * along;
+                    to.z = wa.z + sign * end;
+                    from.x += (float)side * offset;
+                    to.x += (float)side * offset;
+                }
+                from.y = to.y = 0.083f;
+                DrawLine3D(from, to, lane);
+            }
+        }
+
+        // Raised-looking edge lines make the road boundary legible from street level.
+        for (int side = -1; side <= 1; side += 2) {
+            Vector3 from = wa, to = wb;
+            if (horizontal) {
+                from.z += (float)side * roadWidth * 0.5f;
+                to.z += (float)side * roadWidth * 0.5f;
+            } else {
+                from.x += (float)side * roadWidth * 0.5f;
+                to.x += (float)side * roadWidth * 0.5f;
+            }
+            from.y = to.y = 0.10f;
+            DrawLine3D(from, to, curb);
+        }
+    }
+
+    // Zebra stripes are positioned from the same two intersection nodes and
+    // offsets as the 2D crosswalks in DrawCity().
+    const int junctions[] = {1, 2};
+    for (int j = 0; j < 2; j++) {
+        Vector2 node = CITY_LAYOUT_ROAD_NODES[junctions[j]];
+        for (int side = -1; side <= 1; side += 2) {
+            float crossX = node.x + (side < 0 ? CITY_LAYOUT_CROSSWALK_LEFT_OFFSET :
+                                                CITY_LAYOUT_CROSSWALK_RIGHT_OFFSET);
+            for (int stripe = 0; stripe < 5; stripe++) {
+                float x = crossX + (float)stripe * 5.0f;
+                Vector3 from = CityPointToStreetWorld((Vector2){x,
+                    node.y - CITY_LAYOUT_CROSSWALK_HALF_WIDTH});
+                Vector3 to = CityPointToStreetWorld((Vector2){x,
+                    node.y + CITY_LAYOUT_CROSSWALK_HALF_WIDTH});
+                from.y = to.y = 0.09f;
+                DrawLine3D(from, to, (Color){203, 212, 209, 205});
+            }
+        }
+        for (int side = -1; side <= 1; side += 2) {
+            float crossY = node.y + (side < 0 ? CITY_LAYOUT_CROSSWALK_UP_OFFSET :
+                                                CITY_LAYOUT_CROSSWALK_DOWN_OFFSET);
+            for (int stripe = 0; stripe < 5; stripe++) {
+                float z = crossY + (float)stripe * 5.0f;
+                Vector3 from = CityPointToStreetWorld((Vector2){
+                    node.x - CITY_LAYOUT_CROSSWALK_HALF_WIDTH, z});
+                Vector3 to = CityPointToStreetWorld((Vector2){
+                    node.x + CITY_LAYOUT_CROSSWALK_HALF_WIDTH, z});
+                from.y = to.y = 0.09f;
+                DrawLine3D(from, to, (Color){203, 212, 209, 205});
+            }
+        }
+    }
+    // The East Ward connector uses the same narrowed road and crossings as
+    // the 2D map; pedestrian routes cross only at these marked locations.
+    Vector2 eastWard = CITY_LAYOUT_ROAD_NODES[9];
+    for (int stripe = 0; stripe < 5; stripe++) {
+        float z = 262.0f + (float)stripe * 5.0f;
+        Vector3 from = CityPointToStreetWorld((Vector2){eastWard.x - 21.0f, z});
+        Vector3 to = CityPointToStreetWorld((Vector2){eastWard.x + 21.0f, z});
+        from.y = to.y = 0.09f;
+        DrawLine3D(from, to, (Color){203, 212, 209, 205});
+        z = 350.0f + (float)stripe * 5.0f;
+        from = CityPointToStreetWorld((Vector2){eastWard.x - 21.0f, z});
+        to = CityPointToStreetWorld((Vector2){eastWard.x + 21.0f, z});
+        from.y = to.y = 0.09f;
+        DrawLine3D(from, to, (Color){203, 212, 209, 205});
+    }
+    // One crosswalk at the west side of the three-way East Ward junction.
+    for (int stripe = 0; stripe < 5; stripe++) {
+        float x = eastWard.x + CITY_LAYOUT_CROSSWALK_LEFT_OFFSET + (float)stripe * 5.0f;
+        Vector3 from = CityPointToStreetWorld((Vector2){x,
+            eastWard.y - CITY_LAYOUT_CROSSWALK_HALF_WIDTH});
+        Vector3 to = CityPointToStreetWorld((Vector2){x,
+            eastWard.y + CITY_LAYOUT_CROSSWALK_HALF_WIDTH});
+        from.y = to.y = 0.09f;
+        DrawLine3D(from, to, (Color){203, 212, 209, 205});
+    }
+
+    // Receiving apron and four render-only bay stalls. The simulated route
+    // still ends at the shared entrance coordinate in this apron.
+    Rectangle bay = CITY_LAYOUT_HOSPITAL_BAY;
+    Vector3 bayCenter = CityRectCenterToStreetWorld(bay);
+    DrawCubeV((Vector3){bayCenter.x, 0.025f, bayCenter.z},
+              (Vector3){bay.width * scale, 0.07f, bay.height * scale},
+              StreetDistanceColor((Color){61, 76, 81, 255}, bayCenter,
+                                  cameraPosition, condition));
+    for (int side = 0; side < 2; side++) {
+        float x = bay.x + 2.0f + (float)side * (bay.width - 4.0f);
+        Vector3 from = CityPointToStreetWorld((Vector2){x, bay.y + 2.0f});
+        Vector3 to = CityPointToStreetWorld((Vector2){x, bay.y + bay.height - 2.0f});
+        from.y = to.y = 0.09f;
+        DrawLine3D(from, to, (Color){191, 206, 205, 210});
+    }
+    for (int slot = 1; slot < CITY_LAYOUT_HOSPITAL_BAY_COUNT; slot++) {
+        float y = bay.y + bay.height * (float)slot /
+                  (float)CITY_LAYOUT_HOSPITAL_BAY_COUNT;
+        Vector3 from = CityPointToStreetWorld((Vector2){bay.x + 2.0f, y});
+        Vector3 to = CityPointToStreetWorld((Vector2){bay.x + bay.width - 2.0f, y});
+        from.y = to.y = 0.09f;
+        DrawLine3D(from, to, (Color){191, 206, 205, 180});
+    }
+
+    // The driveway matches the 2D access stroke and joins the existing
+    // East Ward route node to the marked ambulance receiving position.
+    Vector3 hospitalAccessStart = CityPointToStreetWorld(
+        CITY_LAYOUT_ROAD_NODES[CITY_LAYOUT_HOSPITAL_ENTRANCE_NODE]);
+    Vector3 hospitalEntrance = CityPointToStreetWorld(CITY_LAYOUT_HOSPITAL_ENTRANCE);
+    float dx = hospitalEntrance.x - hospitalAccessStart.x;
+    float dz = hospitalEntrance.z - hospitalAccessStart.z;
+    float accessLength = sqrtf(dx * dx + dz * dz);
+    Vector3 accessForward = {dx / accessLength, 0.0f, dz / accessLength};
+    Vector3 accessCenter = {(hospitalAccessStart.x + hospitalEntrance.x) * 0.5f,
+                            0.035f,
+                            (hospitalAccessStart.z + hospitalEntrance.z) * 0.5f};
+    DrawStreetOrientedBox(accessCenter, accessForward, accessLength + 0.03f,
+                          0.08f, bay.width * scale,
+                          StreetDistanceColor((Color){68, 82, 91, 255},
+                                              accessCenter, cameraPosition, condition));
+}
+
+static void DrawStreetBuilding(Rectangle footprint, int index, int highlighted,
+                               CityCondition condition, Vector3 cameraPosition)
+{
+    static const Color facades[] = {
+        {82,108,117,255}, {75,102,112,255}, {93,118,127,255},
+        {73,97,108,255}, {78,105,112,255}, {88,111,118,255},
+        {73,101,110,255}, {91,112,119,255}
+    };
+    const float scale = CityPixelsToStreet(1.0f);
+    Vector3 center = CityRectCenterToStreetWorld(footprint);
+    float width = footprint.width * scale;
+    float depth = footprint.height * scale;
+    float height = 3.4f + (float)(index % 4) * 0.75f;
+    Color facade = facades[index % (int)(sizeof(facades) / sizeof(facades[0]))];
+    if (highlighted) facade = (Color){112, 89, 77, 255};
+    facade = StreetDistanceColor(facade, center, cameraPosition, condition);
+
+    DrawCubeV((Vector3){center.x, height * 0.5f, center.z},
+              (Vector3){width, height, depth}, facade);
+    DrawCubeV((Vector3){center.x, height + 0.08f, center.z},
+              (Vector3){width + 0.12f, 0.16f, depth + 0.12f},
+              highlighted ? (Color){64, 49, 46, 255} : (Color){48, 66, 73, 255});
+
+    // Regular windows and a street-facing entrance. The same footprint is
+    // used by the 2D map, while floor count is a restrained visual treatment.
+    int columns = width > 4.8f ? 4 : width > 3.2f ? 3 : 2;
+    int floors = height > 5.0f ? 3 : 2;
+    float windowWidth = fminf(0.34f, (width - 0.55f) / (float)(columns * 1.8f));
+    float windowHeight = 0.24f;
+    Color glass = condition == CITY_NIGHT ? (Color){255, 204, 112, 255} :
+                  StreetDistanceColor((Color){133, 178, 192, 255}, center,
+                                      cameraPosition, condition);
+    for (int floor = 0; floor < floors; floor++) {
+        float y = 0.85f + (float)floor * ((height - 1.1f) / (float)floors);
+        for (int column = 0; column < columns; column++) {
+            float x = center.x - width * 0.5f + 0.5f +
+                      ((float)column + 0.5f) * (width - 1.0f) / (float)columns;
+            DrawCubeV((Vector3){x, y, center.z + depth * 0.5f + 0.025f},
+                      (Vector3){windowWidth, windowHeight, 0.05f}, glass);
+            DrawCubeV((Vector3){x, y, center.z - depth * 0.5f - 0.025f},
+                      (Vector3){windowWidth, windowHeight, 0.05f}, glass);
+        }
+        int sideWindows = depth > 3.6f ? 2 : 1;
+        for (int column = 0; column < sideWindows; column++) {
+            float z = center.z - depth * 0.25f +
+                      (float)column * (depth * 0.5f);
+            DrawCubeV((Vector3){center.x + width * 0.5f + 0.025f, y, z},
+                      (Vector3){0.05f, windowHeight, 0.30f}, glass);
+            DrawCubeV((Vector3){center.x - width * 0.5f - 0.025f, y, z},
+                      (Vector3){0.05f, windowHeight, 0.30f}, glass);
+        }
+    }
+    if (index == CITY_LAYOUT_BUILDING_COUNT + 2) {
+        Vector3 entrance = CityPointToStreetWorld(CITY_LAYOUT_HOSPITAL_ENTRANCE);
+        DrawCubeV((Vector3){center.x + width * 0.5f + 0.04f, 0.52f,
+                            entrance.z},
+                  (Vector3){0.08f, 0.88f, 0.40f}, (Color){44, 56, 61, 255});
+    } else {
+        DrawCubeV((Vector3){center.x, 0.52f, center.z + depth * 0.5f + 0.04f},
+                  (Vector3){0.40f, 0.88f, 0.08f}, (Color){44, 56, 61, 255});
+    }
+}
+
+static void DrawStreetCrosswalkForIncident(Vector2 position)
+{
+    Vector3 p = CityPointToStreetWorld(position);
+    p.y = 0.12f;
+    DrawSphere(p, 0.28f, (Color){245, 79, 69, 225});
+    DrawCylinder((Vector3){p.x, 0.55f, p.z}, 0.055f, 0.055f, 0.75f,
+                 8, (Color){244, 96, 76, 230});
+    DrawCylinder((Vector3){p.x, 0.95f, p.z}, 0.35f, 0.02f, 0.025f,
+                 16, (Color){255, 215, 120, 240});
+}
+
+static Color StreetPedestrianColor(PedestrianState state)
+{
+    switch (state) {
+        case PEDESTRIAN_EVACUATING: return (Color){247, 145, 75, 255};
+        case PEDESTRIAN_BYSTANDING: return (Color){90, 204, 230, 255};
+        case PEDESTRIAN_RESPECTING_CORDON: return (Color){112, 167, 242, 255};
+        case PEDESTRIAN_YIELDING: return (Color){255, 216, 105, 255};
+        case PEDESTRIAN_CROSSING:
+        case PEDESTRIAN_WAITING_TO_CROSS: return (Color){229, 240, 241, 255};
+        default: return (Color){177, 202, 211, 255};
+    }
+}
+
+static void DrawStreetPerson(Vector3 p, Color color, float phase)
+{
+    float step = sinf(phase) * 0.07f;
+    DrawSphere((Vector3){p.x, p.y + 1.03f, p.z}, 0.16f,
+               (Color){224, 190, 160, 255});
+    DrawCubeV((Vector3){p.x, p.y + 0.64f, p.z},
+              (Vector3){0.27f, 0.58f, 0.20f}, color);
+    DrawLine3D((Vector3){p.x, p.y + 0.40f, p.z},
+               (Vector3){p.x - 0.10f + step, p.y + 0.05f, p.z}, color);
+    DrawLine3D((Vector3){p.x, p.y + 0.40f, p.z},
+               (Vector3){p.x + 0.10f - step, p.y + 0.05f, p.z}, color);
+}
+
+static void DrawStreetOrientedBox(Vector3 center, Vector3 forward,
+                                  float length, float height, float width,
+                                  Color color)
+{
+    Vector3 right = {-forward.z, 0.0f, forward.x};
+    float halfLength = length * 0.5f;
+    float halfWidth = width * 0.5f;
+    Vector3 corners[8];
+    for (int top = 0; top < 2; top++) {
+        float y = center.y + (top ? height * 0.5f : -height * 0.5f);
+        for (int front = 0; front < 2; front++) {
+            for (int side = 0; side < 2; side++) {
+                int index = top * 4 + front * 2 + side;
+                float f = front ? halfLength : -halfLength;
+                float r = side ? halfWidth : -halfWidth;
+                corners[index] = (Vector3){center.x + forward.x * f + right.x * r,
+                                           y,
+                                           center.z + forward.z * f + right.z * r};
+            }
+        }
+    }
+    // Each face is two triangles, orienting the vehicle mesh along the same
+    // heading used by the simulation rather than leaving cars sideways.
+    const int faces[6][4] = {
+        {4,5,7,6}, {0,2,3,1}, {0,1,5,4},
+        {2,6,7,3}, {0,4,6,2}, {1,3,7,5}
+    };
+    for (int face = 0; face < 6; face++) {
+        Vector3 a = corners[faces[face][0]], b = corners[faces[face][1]];
+        Vector3 c = corners[faces[face][2]], d = corners[faces[face][3]];
+        DrawTriangle3D(a, b, c, color);
+        DrawTriangle3D(a, c, d, color);
+    }
+}
+
+static void DrawStreetCivilianCar(const CivilianCar *car, int index)
+{
+    Vector3 p = CityPointToStreetWorld(car->position);
+    // The map simulation already offsets cars into their directional lanes;
+    // this model stays at that exact point and uses the same heading.
+    float angle = car->headingDegrees * DEG2RAD;
+    Vector3 forward = {cosf(angle), 0.0f, sinf(angle)};
+    Color body = car->yieldTime > 0.0f ? (Color){221, 161, 78, 255} :
+                 (index % 3 == 0 ? (Color){163, 184, 194, 255} :
+                  index % 3 == 1 ? (Color){117, 147, 166, 255} :
+                                  (Color){194, 198, 184, 255});
+    Vector3 bodyCenter = {p.x, 0.28f, p.z};
+    DrawStreetOrientedBox(bodyCenter, forward, 0.72f, 0.32f, 0.40f, body);
+    DrawStreetOrientedBox((Vector3){p.x, 0.48f, p.z}, forward,
+                          0.39f, 0.18f, 0.31f, (Color){73, 105, 120, 255});
+    Vector3 nose = {p.x + forward.x * 0.34f, 0.28f,
+                    p.z + forward.z * 0.34f};
+    DrawCubeV(nose, (Vector3){0.12f, 0.10f, 0.11f},
+              (Color){236, 224, 177, 255});
+}
+
+static void DrawStreetTree(Vector2 cityPoint, float time, CityCondition condition)
+{
+    Vector3 p = CityPointToStreetWorld(cityPoint);
+    float sway = (condition == CITY_WIND ? 0.19f : 0.025f) *
+                 sinf(time * (condition == CITY_WIND ? 2.3f : 0.8f) +
+                      cityPoint.x * 0.037f);
+    DrawCylinderEx((Vector3){p.x, CITY_LAYOUT_STREET_GROUND_Y, p.z},
+                   (Vector3){p.x, 1.03f, p.z}, 0.10f, 0.075f,
+                   6, (Color){105, 82, 62, 255});
+    DrawSphere((Vector3){p.x + sway * 0.55f, 1.03f, p.z},
+               0.49f, (Color){47, 105, 77, 255});
+    DrawSphere((Vector3){p.x - 0.18f + sway, 1.20f, p.z - 0.08f}, 0.27f,
+               (Color){65, 129, 88, 255});
+}
+
+static void DrawStreetFurniture(CityCondition condition, float time)
+{
+    for (int i = 0; i < CITY_LAYOUT_STREET_LAMP_COUNT; i++) {
+        Vector3 base = CityPointToStreetWorld(CITY_LAYOUT_STREET_LAMPS[i]);
+        Color metal = condition == CITY_NIGHT ? (Color){77, 91, 103, 255} :
+                                                (Color){103, 121, 128, 255};
+        float headHeight = CITY_LAYOUT_LAMP_HEAD_TOP_Y -
+                           CITY_LAYOUT_LAMP_HEAD_BOTTOM_Y;
+        float lensHeight = CITY_LAYOUT_LAMP_LENS_TOP_Y -
+                           CITY_LAYOUT_LAMP_LENS_BOTTOM_Y;
+        // The foundation sinks through the shared ground plane and rises above
+        // the sidewalk surface. This makes the contact visible at a distance,
+        // rather than relying on two nearly coplanar surfaces appearing joined.
+        DrawCubeV((Vector3){base.x,
+                            (CITY_LAYOUT_LAMP_FOOTING_BOTTOM_Y +
+                             CITY_LAYOUT_LAMP_FOOTING_TOP_Y) * 0.5f, base.z},
+                  (Vector3){CITY_LAYOUT_LAMP_FOOTING_SIZE,
+                            CITY_LAYOUT_LAMP_FOOTING_TOP_Y -
+                            CITY_LAYOUT_LAMP_FOOTING_BOTTOM_Y,
+                            CITY_LAYOUT_LAMP_FOOTING_SIZE},
+                  (Color){72, 86, 91, 255});
+        // Raylib DrawCylinder() treats position.y as the bottom, not the
+        // center. Use explicit endpoints here so each segment lands exactly
+        // on the shared sidewalk/footing heights instead of hovering by half
+        // its height.
+        DrawCylinderEx((Vector3){base.x, CITY_LAYOUT_LAMP_BASE_BOTTOM_Y, base.z},
+                       (Vector3){base.x, CITY_LAYOUT_LAMP_BASE_TOP_Y, base.z},
+                       CITY_LAYOUT_LAMP_BASE_RADIUS, CITY_LAYOUT_LAMP_BASE_RADIUS,
+                       10, metal);
+        DrawCylinderEx((Vector3){base.x, CITY_LAYOUT_LAMP_POLE_BOTTOM_Y, base.z},
+                       (Vector3){base.x, CITY_LAYOUT_LAMP_POLE_TOP_Y, base.z},
+                       CITY_LAYOUT_LAMP_POLE_RADIUS, 0.045f, 10, metal);
+        // The pole extends into the fixture and below the sidewalk into the
+        // foundation, so neither joint depends on exact edge-to-edge contact.
+        DrawCylinderEx((Vector3){base.x,
+                                 CITY_LAYOUT_LAMP_POLE_TOP_Y - 0.14f, base.z},
+                       (Vector3){base.x,
+                                 CITY_LAYOUT_LAMP_POLE_TOP_Y + 0.02f, base.z},
+                       CITY_LAYOUT_LAMP_POLE_RADIUS * 1.18f,
+                       CITY_LAYOUT_LAMP_POLE_RADIUS * 1.18f, 10, metal);
+        DrawCubeV((Vector3){base.x,
+                  (CITY_LAYOUT_LAMP_HEAD_BOTTOM_Y +
+                   CITY_LAYOUT_LAMP_HEAD_TOP_Y) * 0.5f, base.z},
+                  (Vector3){CITY_LAYOUT_LAMP_HEAD_LENGTH, headHeight,
+                            CITY_LAYOUT_LAMP_HEAD_WIDTH}, metal);
+        Color lens = condition == CITY_NIGHT ? (Color){255, 229, 159, 255} :
+                                               (Color){215, 224, 213, 255};
+        DrawCubeV((Vector3){base.x,
+                  (CITY_LAYOUT_LAMP_LENS_BOTTOM_Y +
+                   CITY_LAYOUT_LAMP_LENS_TOP_Y) * 0.5f, base.z},
+                  (Vector3){CITY_LAYOUT_LAMP_HEAD_LENGTH * 0.78f, lensHeight,
+                            CITY_LAYOUT_LAMP_HEAD_WIDTH * 0.72f}, lens);
+    }
+
+    const int junctions[] = {1, 2};
+    for (int j = 0; j < 2; j++) {
+        Vector2 node = CITY_LAYOUT_ROAD_NODES[junctions[j]];
+        Vector3 sign = CityPointToStreetWorld((Vector2){node.x - 51.0f,
+                                                        node.y + 49.0f});
+        DrawCylinder((Vector3){sign.x, 0.66f, sign.z}, 0.035f, 0.035f,
+                     1.32f, 6, (Color){83, 96, 98, 255});
+        DrawCubeV((Vector3){sign.x, 1.27f, sign.z},
+                  (Vector3){0.48f, 0.30f, 0.08f}, (Color){34, 121, 116, 255});
+    }
+    // These tree locations are the same planted points used by the 2D map.
+    static const Vector2 trees[] = {
+        {68,76}, {119,108}, {92,116}, {131,78},
+        {520,185}, {606,222}, {573,181}, {546,225},
+        {870,493}, {943,550}
+    };
+    for (int i = 0; i < (int)(sizeof(trees) / sizeof(trees[0])); i++)
+        DrawStreetTree(trees[i], time, condition);
+}
+
+static unsigned char StreetSignGlyphRow(char ch, int row)
+{
+    static const unsigned char font[26][7] = {
+        {14,17,17,31,17,17,17}, {30,17,17,30,17,17,30},
+        {14,17,16,16,16,17,14}, {30,17,17,17,17,17,30},
+        {31,16,16,30,16,16,31}, {31,16,16,30,16,16,16},
+        {14,17,16,23,17,17,15}, {17,17,17,31,17,17,17},
+        {31,4,4,4,4,4,31}, {7,2,2,2,18,18,12},
+        {17,18,20,24,20,18,17}, {16,16,16,16,16,16,31},
+        {17,27,21,21,17,17,17}, {17,25,21,19,17,17,17},
+        {14,17,17,17,17,17,14}, {30,17,17,30,16,16,16},
+        {14,17,17,17,21,18,13}, {30,17,17,30,20,18,17},
+        {15,16,16,14,1,1,30}, {31,4,4,4,4,4,4},
+        {17,17,17,17,17,17,14}, {17,17,17,17,17,10,4},
+        {17,17,17,21,21,21,10}, {17,17,10,4,10,17,17},
+        {17,17,10,4,4,4,4}, {31,1,2,4,8,16,31}
+    };
+    if (ch < 'A' || ch > 'Z' || row < 0 || row > 6) return 0;
+    return font[ch - 'A'][row];
+}
+
+static void DrawStreetSignText(const char *text, Vector3 center, float cell,
+                               Color ink)
+{
+    const float advance = cell * 6.0f;
+    float width = (float)strlen(text) * advance - cell;
+    float startX = center.x - width * 0.5f;
+    for (int letter = 0; text[letter]; letter++) {
+        for (int row = 0; row < 7; row++) {
+            unsigned char bits = StreetSignGlyphRow(text[letter], row);
+            for (int column = 0; column < 5; column++) {
+                if ((bits & (1u << (4 - column))) == 0) continue;
+                DrawCubeV((Vector3){startX + (float)letter * advance +
+                                    (float)column * cell,
+                                    center.y + ((float)3 - (float)row) * cell,
+                                    center.z},
+                          (Vector3){cell * 0.78f, cell * 0.78f, 0.025f}, ink);
+            }
+        }
+    }
+}
+
+static void DrawStreetSignTextEast(const char *text, Vector3 center, float cell,
+                                   Color ink)
+{
+    const float advance = cell * 6.0f;
+    float width = (float)strlen(text) * advance - cell;
+    float startZ = center.z - width * 0.5f;
+    for (int letter = 0; text[letter]; letter++) {
+        for (int row = 0; row < 7; row++) {
+            unsigned char bits = StreetSignGlyphRow(text[letter], row);
+            for (int column = 0; column < 5; column++) {
+                if ((bits & (1u << (4 - column))) == 0) continue;
+                DrawCubeV((Vector3){center.x,
+                                    center.y + ((float)3 - (float)row) * cell,
+                                    startZ + (float)letter * advance +
+                                    (float)column * cell},
+                          (Vector3){0.025f, cell * 0.78f, cell * 0.78f}, ink);
+            }
+        }
+    }
+}
+
+static void DrawStreetHospitalEntrance(Vector3 cameraPosition,
+                                       CityCondition condition)
+{
+    Vector3 door = CityPointToStreetWorld(CITY_LAYOUT_HOSPITAL_DOOR);
+    Vector3 arrival = CityPointToStreetWorld(CITY_LAYOUT_HOSPITAL_ENTRANCE);
+    float edgeX = door.x;
+    Color canopy = StreetDistanceColor((Color){49, 137, 133, 255},
+                                      door, cameraPosition, condition);
+    // Canopy projects from the east-facing entrance into the ambulance bay.
+    DrawCubeV((Vector3){edgeX + 0.24f, 1.23f, door.z},
+              (Vector3){0.62f, 0.13f, 1.05f}, canopy);
+    DrawCubeV((Vector3){edgeX + 0.49f, 0.66f, door.z - 0.40f},
+              (Vector3){0.07f, 1.12f, 0.07f}, (Color){81, 99, 102, 255});
+    DrawCubeV((Vector3){edgeX + 0.49f, 0.66f, door.z + 0.40f},
+              (Vector3){0.07f, 1.12f, 0.07f}, (Color){81, 99, 102, 255});
+
+    // A wall-mounted sign faces the approaching ambulance on the access road.
+    Vector3 plate = {edgeX + 0.04f, 2.02f, door.z - 0.50f};
+    DrawCubeV(plate, (Vector3){0.12f, 0.70f, 2.18f},
+              (Color){12, 43, 51, 255});
+    DrawCubeV((Vector3){plate.x + 0.07f, plate.y, plate.z},
+              (Vector3){0.035f, 0.62f, 2.08f},
+              StreetDistanceColor((Color){35, 131, 119, 255}, plate,
+                                  cameraPosition, condition));
+    DrawStreetSignTextEast("HOSPITAL", (Vector3){plate.x + 0.10f,
+                           plate.y - 0.04f, plate.z}, 0.034f, RAYWHITE);
+    Vector3 cross = {plate.x + 0.11f, plate.y + 0.38f, plate.z};
+    DrawCubeV(cross, (Vector3){0.035f, 0.25f, 0.08f}, RAYWHITE);
+    DrawCubeV(cross, (Vector3){0.035f, 0.08f, 0.25f}, RAYWHITE);
+
+    Vector3 groundMark = {arrival.x, 0.11f, arrival.z};
+    DrawCylinder(groundMark, 0.19f, 0.19f, 0.035f, 12,
+                 (Color){91, 225, 182, 235});
+    DrawCubeV((Vector3){arrival.x - 0.06f, 0.15f, arrival.z},
+              (Vector3){0.08f, 0.06f, 0.28f}, RAYWHITE);
+}
+
+static void DrawStreetServiceSign(Rectangle footprint, const char *label,
+                                  const char *secondary, Color color)
+{
+    Vector3 building = CityRectCenterToStreetWorld(footprint);
+    float depth = footprint.height * CITY_LAYOUT_STREET_SCALE;
+    // The plate is mounted to the building's street-facing wall, not suspended
+    // above the sidewalk. Its position is derived from the shared 2D footprint.
+    Vector3 plate = {building.x, 1.58f, building.z + depth * 0.5f + 0.09f};
+    float width = secondary ? 2.55f : 1.75f;
+    float height = secondary ? 0.78f : 0.56f;
+    DrawCubeV(plate, (Vector3){width, height, 0.12f}, (Color){10, 30, 42, 255});
+    DrawCubeV((Vector3){plate.x, plate.y, plate.z + 0.07f},
+              (Vector3){width - 0.09f, height - 0.09f, 0.025f}, color);
+    float textCell = secondary ? 0.027f : 0.038f;
+    if (secondary) {
+        DrawStreetSignText(label, (Vector3){plate.x, plate.y + 0.15f, plate.z + 0.10f},
+                           textCell, RAYWHITE);
+        DrawStreetSignText(secondary,
+                           (Vector3){plate.x, plate.y - 0.17f, plate.z + 0.10f},
+                           textCell, RAYWHITE);
+    } else {
+        DrawStreetSignText(label, (Vector3){plate.x, plate.y, plate.z + 0.10f},
+                           textCell, RAYWHITE);
+    }
+}
+
+static void DrawStreetEmergencyVehicle(const Vehicle *vehicle, Vector3 p,
+                                       int selected, float time)
+{
+    Vector3 forward = ResponseUnitForward(vehicle);
+    Color body = vehicle->serviceType == INCIDENT_FIRE ? (Color){230, 48, 62, 255} :
+                 vehicle->serviceType == INCIDENT_CRIME ? (Color){36, 129, 238, 255} :
+                                                          (Color){230, 237, 230, 255};
+    Vector3 size;
+    if (vehicle->serviceType == INCIDENT_FIRE)
+        size = selected ? (Vector3){1.85f, 0.64f, 0.88f} :
+                          (Vector3){1.58f, 0.55f, 0.78f};
+    else if (vehicle->serviceType == INCIDENT_ACCIDENT)
+        size = selected ? (Vector3){1.48f, 0.68f, 0.88f} :
+                          (Vector3){1.25f, 0.59f, 0.78f};
+    else
+        size = selected ? (Vector3){1.36f, 0.48f, 0.78f} :
+                          (Vector3){1.14f, 0.43f, 0.68f};
+    DrawStreetOrientedBox((Vector3){p.x, 0.34f, p.z}, forward,
+                          size.x, size.y, size.z, body);
+    float cabY = vehicle->serviceType == INCIDENT_ACCIDENT ? 0.82f : 0.66f;
+    float cabLength = vehicle->serviceType == INCIDENT_FIRE ? 0.48f : 0.62f;
+    DrawStreetOrientedBox((Vector3){p.x, cabY, p.z}, forward,
+                          size.x * cabLength, size.y * 0.40f, size.z * 0.72f,
+                          vehicle->serviceType == INCIDENT_ACCIDENT ?
+                              (Color){208, 222, 220, 255} :
+                              (Color){74, 103, 116, 255});
+    Vector3 right = {-forward.z, 0.0f, forward.x};
+    for (int axle = -1; axle <= 1; axle += 2) {
+        for (int side = -1; side <= 1; side += 2) {
+            Vector3 wheel = {p.x + forward.x * (float)axle * size.x * 0.31f +
+                                  right.x * (float)side * size.z * 0.47f,
+                             0.20f,
+                             p.z + forward.z * (float)axle * size.x * 0.31f +
+                                  right.z * (float)side * size.z * 0.47f};
+            DrawStreetOrientedBox(wheel, forward, 0.30f, 0.22f, 0.13f,
+                                  (Color){27, 37, 43, 255});
+        }
+    }
+    DrawStreetOrientedBox((Vector3){p.x + forward.x * size.x * 0.49f, 0.29f,
+                                    p.z + forward.z * size.x * 0.49f},
+                          forward, 0.12f, 0.17f, size.z * 0.88f,
+                          (Color){49, 60, 65, 255});
+    if (vehicle->serviceType == INCIDENT_FIRE) {
+        // Tank panel and ladder distinguish the engine from the other units.
+        DrawStreetOrientedBox((Vector3){p.x - forward.x * 0.12f, 0.69f,
+                                        p.z - forward.z * 0.12f}, forward,
+                              size.x * 0.54f, 0.06f, size.z * 0.82f,
+                              (Color){241, 198, 77, 255});
+        Vector3 ladderA = {p.x - forward.x * 0.40f + right.x * 0.24f,
+                           0.99f, p.z - forward.z * 0.40f + right.z * 0.24f};
+        Vector3 ladderB = {p.x + forward.x * 0.42f + right.x * 0.24f,
+                           0.99f, p.z + forward.z * 0.42f + right.z * 0.24f};
+        DrawLine3D(ladderA, ladderB, (Color){235, 229, 199, 255});
+        DrawLine3D((Vector3){ladderA.x + right.x * 0.09f, ladderA.y, ladderA.z + right.z * 0.09f},
+                   (Vector3){ladderB.x + right.x * 0.09f, ladderB.y, ladderB.z + right.z * 0.09f},
+                   (Color){235, 229, 199, 255});
+    } else if (vehicle->serviceType == INCIDENT_CRIME) {
+        // Police markings are simple contrasting door panels.
+        DrawStreetOrientedBox((Vector3){p.x, 0.42f, p.z}, forward,
+                              size.x * 0.30f, 0.12f, size.z * 1.02f,
+                              (Color){224, 234, 239, 255});
+        Vector3 badge = {p.x + right.x * size.z * 0.50f, 0.48f,
+                         p.z + right.z * size.z * 0.50f};
+        DrawCubeV(badge, (Vector3){0.13f, 0.13f, 0.05f}, (Color){30, 69, 119, 255});
+    } else {
+        // A medical cross and side stripe make the ambulance recognizable.
+        DrawStreetOrientedBox((Vector3){p.x, 0.40f, p.z}, forward,
+                              size.x * 0.74f, 0.08f, size.z * 1.02f,
+                              (Color){52, 164, 204, 255});
+        Vector3 cross = {p.x + right.x * size.z * 0.50f, 0.70f,
+                         p.z + right.z * size.z * 0.50f};
+        DrawCubeV(cross, (Vector3){0.12f, 0.24f, 0.05f}, (Color){213, 63, 70, 255});
+        DrawCubeV((Vector3){cross.x, cross.y, cross.z},
+                  (Vector3){0.24f, 0.10f, 0.05f}, (Color){213, 63, 70, 255});
+    }
+    Vector3 beacon = {p.x, vehicle->serviceType == INCIDENT_ACCIDENT ? 1.08f : 0.81f, p.z};
+    if (vehicle->activity == UNIT_RESPONDING || vehicle->activity == UNIT_ON_SCENE ||
+        vehicle->activity == UNIT_TRANSPORTING) {
+        Color leftFlash = (Color){235, 49, 60, 255};
+        Color rightFlash = (Color){48, 143, 255, 255};
+        if (vehicle->serviceType == INCIDENT_FIRE) {
+            leftFlash = (Color){245, 52, 54, 255};
+            rightFlash = (Color){255, 191, 74, 255};
+        } else if (vehicle->serviceType == INCIDENT_ACCIDENT) {
+            leftFlash = (Color){246, 249, 244, 255};
+            rightFlash = (Color){61, 177, 245, 255};
+        }
+        if (((int)(time * 12.0f) & 1) != 0) {
+            Color swap = leftFlash;
+            leftFlash = rightFlash;
+            rightFlash = swap;
+        }
+        Vector3 leftBeacon = {p.x - right.x * 0.17f, beacon.y,
+                              p.z - right.z * 0.17f};
+        Vector3 rightBeacon = {p.x + right.x * 0.17f, beacon.y,
+                               p.z + right.z * 0.17f};
+        DrawCubeV(leftBeacon, (Vector3){0.20f, 0.12f, 0.19f}, leftFlash);
+        DrawCubeV(rightBeacon, (Vector3){0.20f, 0.12f, 0.19f}, rightFlash);
+    }
+    Vector3 marker = {p.x + forward.x * size.x * 0.42f, 0.35f,
+                      p.z + forward.z * size.x * 0.42f};
+    DrawCubeV(marker, (Vector3){0.15f, 0.12f, 0.14f},
+              (Color){245, 231, 175, 255});
+    (void)selected; // The followed unit is already distinguished by its larger model and HUD.
+}
+
+static Vector3 StreetVehicleDisplayPosition(const Simulation *simulation, int vehicleIndex)
+{
+    const Vehicle *vehicle = &simulation->vehicles[vehicleIndex];
+    Vector2 hospitalSlot;
+    if (HospitalArrivalSlotForVehicle(simulation, vehicleIndex, &hospitalSlot))
+        return CityPointToStreetWorld(hospitalSlot);
+    Vector2 axis = {1.0f, 0.0f};
+    if (vehicle->routeCount >= 2) {
+        Vector3 forward = ResponseUnitForward(vehicle);
+        axis = (Vector2){forward.x, forward.z};
+    }
+    int rank = 0;
+    int count = 0;
+    int firstClusterVehicle = vehicleIndex;
+    for (int i = 0; i < simulation->vehicleCount; i++) {
+        const Vehicle *other = &simulation->vehicles[i];
+        Vector2 delta = {other->position.x - vehicle->position.x,
+                         other->position.y - vehicle->position.y};
+        float longitudinal = delta.x * axis.x + delta.y * axis.y;
+        float lateral = -delta.x * axis.y + delta.y * axis.x;
+        // At street scale the longest emergency model is about 41 map pixels.
+        // Only nearly same-lane overlaps are spread; parallel traffic stays in
+        // its true directional lane.
+        if (fabsf(longitudinal) < 42.0f && fabsf(lateral) < 17.0f) {
+            if (i < vehicleIndex) rank++;
+            if (i < firstClusterVehicle) firstClusterVehicle = i;
+            count++;
+        }
+    }
+    Vector2 visual = vehicle->position;
+    if (count > 1) {
+        if (firstClusterVehicle >= 0 && firstClusterVehicle < simulation->vehicleCount &&
+            simulation->vehicles[firstClusterVehicle].routeCount >= 2) {
+            Vector3 firstForward = ResponseUnitForward(&simulation->vehicles[firstClusterVehicle]);
+            axis = (Vector2){firstForward.x, firstForward.z};
+        }
+        const float spacing = 46.0f;
+        float centeredRank = (float)rank - ((float)count - 1.0f) * 0.5f;
+        visual.x += axis.x * centeredRank * spacing;
+        visual.y += axis.y * centeredRank * spacing;
+    }
+    return CityPointToStreetWorld(visual);
+}
+
+static int StreetPointVisibleToCamera(Camera3D camera, Vector3 point)
+{
+    Vector3 delta = {point.x - camera.position.x, 0.0f,
+                     point.z - camera.position.z};
+    float distance = sqrtf(delta.x * delta.x + delta.z * delta.z);
+    if (distance > 24.0f) return 0;
+    Vector3 view = {camera.target.x - camera.position.x, 0.0f,
+                    camera.target.z - camera.position.z};
+    float viewLength = sqrtf(view.x * view.x + view.z * view.z);
+    if (viewLength < 0.001f) return 1;
+    view.x /= viewLength;
+    view.z /= viewLength;
+    float dot = (delta.x * view.x + delta.z * view.z) / fmaxf(distance, 0.001f);
+    float side = fabsf(view.x * delta.z - view.z * delta.x);
+    return dot >= -0.15f && side <= distance * 0.95f + 1.25f;
+}
+
+static int StreetCameraPointerAllowed(Vector2 pointer)
+{
+    Rectangle reserved[MAX_VEHICLES + 1];
+    for (int row = 0; row < MAX_VEHICLES; row++)
+        reserved[row] = ResponseUnitRowBounds(row);
+    reserved[MAX_VEHICLES] = (Rectangle){mapClip.x,
+        mapClip.y + mapClip.height - 56.0f, mapClip.width, 56.0f};
+    return ResponseCameraPointerAllowed(pointer, mapClip, reserved,
+                                        MAX_VEHICLES + 1);
+}
+
+static Vector3 StreetIncidentFirePoint(const Incident *incident)
+{
+    Vector3 fire = CityPointToStreetWorld(incident->position);
+    if (incident->fireBuildingIndex >= 0 &&
+        incident->fireBuildingIndex < CITY_LAYOUT_BUILDING_COUNT) {
+        fire = CityRectCenterToStreetWorld(
+            CITY_LAYOUT_BUILDINGS[incident->fireBuildingIndex]);
+        fire.y = 4.0f + (float)(incident->fireBuildingIndex % 4) * 0.75f;
+    } else {
+        fire.y = 1.25f;
+    }
+    return fire;
+}
+
+static void DrawStreetResponder(Vector3 p, IncidentType service, int action,
+                                float phase)
+{
+    Color uniform = service == INCIDENT_FIRE ? (Color){220, 113, 48, 255} :
+                    service == INCIDENT_CRIME ? (Color){49, 111, 198, 255} :
+                                                (Color){42, 160, 120, 255};
+    float bob = sinf(phase) * 0.025f;
+    Vector3 head = {p.x, p.y + 1.05f + bob, p.z};
+    Vector3 shoulder = {p.x, p.y + 0.76f + bob, p.z};
+    Vector3 chest = {p.x, p.y + 0.62f + bob, p.z};
+    DrawSphere(head, 0.15f, (Color){224, 190, 162, 255});
+    DrawCubeV((Vector3){p.x, p.y + 0.68f + bob, p.z},
+              (Vector3){0.34f, 0.52f, 0.25f}, uniform);
+    DrawCylinderEx((Vector3){p.x - 0.11f, p.y + 0.40f, p.z},
+                   (Vector3){p.x - 0.13f + bob, p.y + 0.05f, p.z},
+                   0.055f, 0.045f, 6, (Color){38, 48, 54, 255});
+    DrawCylinderEx((Vector3){p.x + 0.11f, p.y + 0.40f, p.z},
+                   (Vector3){p.x + 0.13f - bob, p.y + 0.05f, p.z},
+                   0.055f, 0.045f, 6, (Color){38, 48, 54, 255});
+
+    if (service == INCIDENT_FIRE) {
+        DrawSphere((Vector3){head.x, head.y + 0.13f, head.z}, 0.17f,
+                   (Color){246, 190, 61, 255});
+        DrawLine3D((Vector3){p.x, p.y + 0.66f, p.z + 0.13f},
+                   (Vector3){p.x, p.y + 0.66f, p.z - 0.13f},
+                   (Color){247, 212, 92, 255});
+        if (action == 1) {
+            DrawCylinderEx((Vector3){p.x - 0.10f, shoulder.y, p.z},
+                           (Vector3){p.x - 0.06f, p.y + 0.62f, p.z + 0.28f},
+                           0.07f, 0.055f, 6, uniform);
+            DrawCylinderEx((Vector3){p.x + 0.10f, shoulder.y, p.z},
+                           (Vector3){p.x + 0.06f, p.y + 0.62f, p.z + 0.28f},
+                           0.07f, 0.055f, 6, uniform);
+            DrawSphere((Vector3){p.x, p.y + 0.62f, p.z + 0.30f}, 0.07f,
+                       (Color){63, 74, 78, 255});
+        } else {
+            DrawCylinderEx((Vector3){p.x - 0.16f, shoulder.y, p.z},
+                           (Vector3){p.x - 0.20f, p.y + 0.40f, p.z + 0.08f},
+                           0.06f, 0.05f, 6, uniform);
+            DrawCylinderEx((Vector3){p.x + 0.16f, shoulder.y, p.z},
+                           (Vector3){p.x + 0.20f, p.y + 0.40f, p.z + 0.08f},
+                           0.06f, 0.05f, 6, uniform);
+        }
+    } else if (service == INCIDENT_CRIME) {
+        DrawCubeV((Vector3){head.x, head.y + 0.13f, head.z},
+                  (Vector3){0.32f, 0.08f, 0.28f}, (Color){27, 53, 91, 255});
+        if (action == 2) {
+            DrawCylinderEx((Vector3){p.x - 0.15f, shoulder.y, p.z},
+                           (Vector3){p.x - 0.48f, p.y + 0.79f, p.z},
+                           0.06f, 0.045f, 6, uniform);
+            DrawCylinderEx((Vector3){p.x + 0.15f, shoulder.y, p.z},
+                           (Vector3){p.x + 0.48f, p.y + 0.82f, p.z},
+                           0.06f, 0.045f, 6, uniform);
+            DrawCubeV((Vector3){p.x + 0.51f, p.y + 0.84f, p.z},
+                      (Vector3){0.06f, 0.28f, 0.06f}, (Color){255, 203, 82, 255});
+        } else {
+            DrawCylinderEx((Vector3){p.x + 0.15f, shoulder.y, p.z},
+                           (Vector3){p.x + 0.28f, p.y + 0.50f, p.z + 0.12f},
+                           0.06f, 0.05f, 6, uniform);
+        }
+    } else if (action == 3) {
+        // A low, forward-leaning pose reads as patient care rather than a
+        // standing bystander. It is drawn only during a staffed treatment stage.
+        DrawCubeV((Vector3){p.x, p.y + 1.17f, p.z},
+                  (Vector3){0.31f, 0.08f, 0.25f}, RAYWHITE);
+        DrawCubeV((Vector3){p.x, p.y + 1.17f, p.z},
+                  (Vector3){0.08f, 0.23f, 0.05f}, (Color){215, 58, 69, 255});
+        DrawCubeV((Vector3){p.x, p.y + 1.17f, p.z},
+                  (Vector3){0.23f, 0.08f, 0.05f}, (Color){215, 58, 69, 255});
+        DrawCylinderEx((Vector3){p.x - 0.15f, chest.y, p.z},
+                       (Vector3){p.x - 0.22f, p.y + 0.34f, p.z + 0.25f},
+                       0.06f, 0.045f, 6, uniform);
+        DrawCylinderEx((Vector3){p.x + 0.15f, chest.y, p.z},
+                       (Vector3){p.x + 0.22f, p.y + 0.34f, p.z + 0.25f},
+                       0.06f, 0.045f, 6, uniform);
+    } else {
+        DrawCylinderEx((Vector3){p.x - 0.15f, shoulder.y, p.z},
+                       (Vector3){p.x - 0.20f, p.y + 0.42f, p.z + 0.05f},
+                       0.06f, 0.05f, 6, uniform);
+        DrawCylinderEx((Vector3){p.x + 0.15f, shoulder.y, p.z},
+                       (Vector3){p.x + 0.20f, p.y + 0.42f, p.z + 0.05f},
+                       0.06f, 0.05f, 6, uniform);
+    }
+}
+
+static void DrawStreetPoliceCordon(Vector2 incidentPosition)
+{
+    Vector3 a = CityPointToStreetWorld((Vector2){incidentPosition.x - 18.0f,
+                                                 incidentPosition.y - 15.0f});
+    Vector3 b = CityPointToStreetWorld((Vector2){incidentPosition.x + 18.0f,
+                                                 incidentPosition.y - 15.0f});
+    a.y = b.y = 0.36f;
+    DrawLine3D(a, b, (Color){68, 148, 235, 235});
+    Vector3 coneA = a, coneB = b;
+    coneA.y = coneB.y = 0.14f;
+    DrawCylinder(coneA, 0.11f, 0.035f, 0.28f, 6, (Color){242, 151, 65, 255});
+    DrawCylinder(coneB, 0.11f, 0.035f, 0.28f, 6, (Color){242, 151, 65, 255});
+}
+
+static void DrawStreetOnSceneWork(const Simulation *simulation, int incidentIndex,
+                                  const Incident *incident)
+{
+    if (!incident || incidentIndex < 0 || IsIncidentFinished(incident)) return;
+    Vector3 target = CityPointToStreetWorld(incident->position);
+    int fireReady = HasRequiredOnSceneService(simulation, incidentIndex, INCIDENT_FIRE);
+    int policeReady = HasRequiredOnSceneService(simulation, incidentIndex, INCIDENT_CRIME);
+    int ambulanceReady = HasRequiredOnSceneService(simulation, incidentIndex,
+                                                    INCIDENT_ACCIDENT);
+    for (int i = 0; i < simulation->vehicleCount; i++) {
+        const Vehicle *unit = &simulation->vehicles[i];
+        if (unit->assignedIncident != incidentIndex || !unit->arrived ||
+            unit->activity != UNIT_ON_SCENE) continue;
+        Vector3 engine = StreetVehicleDisplayPosition(simulation, i);
+        Vector3 forward = ResponseUnitForward(unit);
+        Vector3 right = {-forward.z, 0.0f, forward.x};
+        Vector3 worker = {engine.x + right.x * 0.9f, 0.0f,
+                          engine.z + right.z * 0.9f};
+        if (incident->status == INCIDENT_FIREFIGHTING && fireReady &&
+            unit->serviceType == INCIDENT_FIRE) {
+            DrawStreetResponder(worker, INCIDENT_FIRE, 1,
+                                simulation->elapsedTime * 5.0f + (float)i);
+            Vector3 engineHose = {engine.x, 0.23f, engine.z};
+            Vector3 hands = {worker.x, 0.64f, worker.z + 0.30f};
+            DrawCylinderEx(engineHose, hands, 0.055f, 0.045f, 6,
+                           (Color){49, 59, 62, 255});
+            Vector3 fire = StreetIncidentFirePoint(incident);
+            fire.y += 0.30f;
+            // Bright core and droplets make the live water stream distinct from
+            // the dark hose. All movement is keyed to simulation time/stage.
+            DrawCylinderEx(hands, fire, 0.045f, 0.018f, 7,
+                           (Color){107, 199, 245, 235});
+            for (int drop = 1; drop <= 5; drop++) {
+                float t = (float)drop / 6.0f;
+                float arc = 0.35f * sinf(t * PI);
+                float spray = sinf(simulation->elapsedTime * 18.0f +
+                                   (float)(drop + i)) * 0.04f;
+                Vector3 particle = {
+                    hands.x + (fire.x - hands.x) * t,
+                    hands.y + (fire.y - hands.y) * t + arc + spray,
+                    hands.z + (fire.z - hands.z) * t
+                };
+                DrawSphere(particle, 0.055f - t * 0.018f,
+                           (Color){165, 224, 252, 235});
+            }
+        } else if (incident->status == INCIDENT_SECURING && policeReady &&
+                   unit->serviceType == INCIDENT_CRIME) {
+            DrawStreetResponder(worker, INCIDENT_CRIME, 0,
+                                simulation->elapsedTime * 2.0f + (float)i);
+            DrawStreetPoliceCordon(incident->position);
+        } else if (incident->status == INCIDENT_TREATING && ambulanceReady &&
+                   unit->serviceType == INCIDENT_ACCIDENT) {
+            Vector3 patient = {target.x + 0.42f, 0.0f, target.z + 0.36f};
+            DrawCubeV((Vector3){patient.x, 0.13f, patient.z},
+                      (Vector3){0.54f, 0.13f, 0.25f},
+                      (Color){231, 235, 223, 255});
+            DrawSphere((Vector3){patient.x + 0.30f, 0.20f, patient.z},
+                       0.10f, (Color){229, 192, 163, 255});
+            DrawStreetResponder(worker, INCIDENT_ACCIDENT, 3,
+                                simulation->elapsedTime * 2.5f + (float)i);
+            DrawLine3D((Vector3){worker.x, 0.48f, worker.z},
+                       (Vector3){patient.x, 0.30f, patient.z},
+                       (Color){74, 218, 164, 255});
+            // Medical cross on the treatment bag signals care without adding
+            // another patient or changing the simulation's actor count.
+            DrawCubeV((Vector3){worker.x + 0.12f, 0.55f, worker.z},
+                      (Vector3){0.08f, 0.18f, 0.05f}, RAYWHITE);
+            DrawCubeV((Vector3){worker.x + 0.12f, 0.55f, worker.z},
+                      (Vector3){0.18f, 0.07f, 0.05f}, RAYWHITE);
+        } else if (unit->serviceType == INCIDENT_CRIME && policeReady &&
+                   incident->status == INCIDENT_RESPONDING &&
+                   incident->type == INCIDENT_CRIME) {
+            DrawStreetResponder(worker, INCIDENT_CRIME, 0,
+                                simulation->elapsedTime * 2.0f + (float)i);
+            // Evidence markers are shown only during an active, staffed police
+            // response. They are props, not additional evidence logic.
+            Vector3 evidence = {target.x + 0.6f, 0.04f, target.z - 0.55f};
+            DrawCylinder(evidence, 0.08f, 0.08f, 0.08f, 6,
+                         (Color){255, 204, 92, 255});
+        } else if (unit->serviceType == INCIDENT_CRIME && policeReady &&
+                   incident->sceneSecured && incident->type == INCIDENT_ACCIDENT &&
+                   incident->status == INCIDENT_TREATING) {
+            // Scene security is complete; police can now direct traffic while
+            // the required ambulance crew treats the patient.
+            DrawStreetResponder(worker, INCIDENT_CRIME, 2,
+                                simulation->elapsedTime * 3.0f + (float)i);
+            Vector3 baton = {worker.x + 0.22f, 0.68f, worker.z};
+            DrawLine3D((Vector3){worker.x, 0.63f, worker.z}, baton,
+                       (Color){255, 205, 91, 255});
+        } else if (unit->serviceType == INCIDENT_CRIME && policeReady &&
+                   incident->needsSceneSecurity && incident->sceneSecured) {
+            DrawStreetResponder(worker, INCIDENT_CRIME, 0,
+                                simulation->elapsedTime * 2.0f + (float)i);
+            DrawStreetPoliceCordon(incident->position);
+        } else if (unit->serviceType == INCIDENT_FIRE) {
+            // Arrived crews wait beside their engine while police secure a scene.
+            DrawStreetResponder(worker, INCIDENT_FIRE, 0,
+                                simulation->elapsedTime * 2.0f + (float)i);
+        } else if (unit->serviceType == INCIDENT_ACCIDENT) {
+            // Medics remain staged until the simulation enters patient care.
+            DrawStreetResponder(worker, INCIDENT_ACCIDENT, 0,
+                                simulation->elapsedTime * 2.0f + (float)i);
+        }
+    }
+}
+
+#define STREET_WEATHER_PARTICLE_COUNT 64
+
+static Vector3 StreetCameraForward(Camera3D camera)
+{
+    Vector3 forward = {camera.target.x - camera.position.x,
+                       camera.target.y - camera.position.y,
+                       camera.target.z - camera.position.z};
+    float length = sqrtf(forward.x * forward.x + forward.y * forward.y +
+                         forward.z * forward.z);
+    if (length < 0.001f) return (Vector3){0.0f, 0.0f, 1.0f};
+    return (Vector3){forward.x / length, forward.y / length, forward.z / length};
+}
+
+static void DrawStreetWeather(CityCondition condition, Camera3D camera, float time)
+{
+    // Particle positions are regenerated from fixed indices and simulation
+    // time: bounded at 64, repeatable, pause/speed aware, and allocation-free.
+    if (condition != CITY_RAIN && condition != CITY_SNOW && condition != CITY_WIND)
+        return;
+
+    Vector3 forward = StreetCameraForward(camera);
+    Vector3 right = {forward.z, 0.0f, -forward.x};
+    float rightLength = sqrtf(right.x * right.x + right.z * right.z);
+    if (rightLength < 0.001f) right = (Vector3){1.0f, 0.0f, 0.0f};
+    else { right.x /= rightLength; right.z /= rightLength; }
+
+    for (unsigned int i = 0; i < STREET_WEATHER_PARTICLE_COUNT; i++) {
+        float seedX = WeatherSeed(i, 11u);
+        float seedDepth = WeatherSeed(i, 12u);
+        float seedPhase = WeatherSeed(i, 13u);
+        float side = (seedX - 0.5f) * 10.0f;
+        float depth = 2.0f + seedDepth * 8.0f;
+        Vector3 center = {camera.position.x + right.x * side + forward.x * depth,
+                          camera.position.y,
+                          camera.position.z + right.z * side + forward.z * depth};
+
+        if (condition == CITY_RAIN) {
+            float fall = fmodf(time * 4.6f + seedPhase * 4.4f, 4.4f);
+            center.y += 3.4f - fall;
+            float length = 0.30f + WeatherSeed(i, 14u) * 0.20f;
+            Vector3 end = {center.x - right.x * 0.07f,
+                           center.y - length,
+                           center.z - right.z * 0.07f};
+            Vector3 shadowStart = {center.x + right.x * 0.025f, center.y,
+                                   center.z + right.z * 0.025f};
+            Vector3 shadowEnd = {end.x + right.x * 0.025f, end.y,
+                                 end.z + right.z * 0.025f};
+            DrawLine3D(shadowStart, shadowEnd, (Color){11, 30, 43, 185});
+            DrawLine3D(center, end, (Color){221, 241, 250, 225});
+        } else if (condition == CITY_SNOW) {
+            float fall = fmodf(time * 0.65f + seedPhase * 5.0f, 5.0f);
+            float drift = sinf(time * 1.2f + seedX * 13.0f) * 0.28f;
+            center.x += drift;
+            center.z += drift * 0.55f;
+            center.y += 3.2f - fall;
+            float radius = 0.035f + WeatherSeed(i, 15u) * 0.025f;
+            DrawSphere((Vector3){center.x, center.y, center.z}, radius * 1.65f,
+                       (Color){24, 45, 58, 190});
+            DrawSphere((Vector3){center.x + 0.008f, center.y + 0.008f,
+                                 center.z + 0.008f}, radius,
+                       (Color){236, 246, 252, 240});
+        } else {
+            float y = camera.position.y + 0.9f + seedPhase * 2.3f;
+            float gust = 0.20f + WeatherSeed(i, 16u) * 0.34f;
+            center.y = y;
+            Vector3 end = {center.x + right.x * gust,
+                           center.y - 0.018f,
+                           center.z + right.z * gust};
+            DrawLine3D(center, end, (Color){17, 38, 50, 165});
+            DrawLine3D((Vector3){center.x, center.y + 0.008f, center.z},
+                       (Vector3){end.x, end.y + 0.008f, end.z},
+                       (Color){195, 222, 235, 210});
+        }
+    }
+}
+
+static void DrawResponseStreetScene(const Simulation *simulation, int vehicleIndex,
+                                    int firstPerson,
+                                    const ResponseCameraState *cameraState)
+{
+    if (!simulation || vehicleIndex < 0 || vehicleIndex >= simulation->vehicleCount) return;
+    const Vehicle *vehicle = &simulation->vehicles[vehicleIndex];
+    Vector3 vehicleWorld = StreetVehicleDisplayPosition(simulation, vehicleIndex);
+    Vector3 forward = ResponseUnitForward(vehicle);
+
+    Camera3D camera = ResponseCameraBuild(cameraState, vehicleWorld, forward,
+                                          firstPerson);
+    if (!firstPerson) {
+        Vector2 targetMapPoint = CityLayoutStreetPointToMap(camera.target);
+        Vector2 cameraMapPoint = CityLayoutStreetPointToMap(camera.position);
+        cameraMapPoint = CityLayoutSafeCameraPoint(targetMapPoint,
+                                                   cameraMapPoint, 7.0f);
+        camera.position = CityPointToStreetWorld(cameraMapPoint);
+        // Keep the chase camera above the roadway even at its closest zoom.
+        if (camera.position.y < 1.55f) camera.position.y = 1.55f;
+    }
+    camera.position = KeepStreetPointInCity(camera.position);
+    camera.target = KeepStreetPointInCity(camera.target);
+
+    BeginMode3D(camera);
+    Color ground = simulation->cityCondition == CITY_NIGHT ?
+                   (Color){25, 42, 49, 255} :
+                   simulation->cityCondition == CITY_RAIN ?
+                   (Color){42, 65, 72, 255} :
+                   simulation->cityCondition == CITY_SNOW ?
+                   (Color){54, 73, 81, 255} :
+                   (Color){48, 76, 75, 255};
+    DrawPlane((Vector3){0.0f, CITY_LAYOUT_STREET_GROUND_Y, 0.0f},
+              (Vector2){CITY_WIDTH * CITY_LAYOUT_STREET_SCALE + 1.0f,
+                        CITY_HEIGHT * CITY_LAYOUT_STREET_SCALE + 1.0f},
+              ground);
+    DrawStreetRoadNetwork(simulation->cityCondition, camera.position);
+
+    int incidentIndex = vehicle->assignedIncident;
+    const Incident *incident = incidentIndex >= 0 && incidentIndex < simulation->incidentCount ?
+                               &simulation->incidents[incidentIndex] : NULL;
+    for (int i = 0; i < CITY_LAYOUT_BUILDING_COUNT; i++) {
+        DrawStreetBuilding(CITY_LAYOUT_BUILDINGS[i], i,
+                           incident && incident->fireBuildingIndex == i,
+                           simulation->cityCondition, camera.position);
+    }
+    DrawStreetBuilding(CITY_LAYOUT_FIRE_STATION, CITY_LAYOUT_BUILDING_COUNT, 0,
+                       simulation->cityCondition, camera.position);
+    DrawStreetBuilding(CITY_LAYOUT_POLICE_STATION, CITY_LAYOUT_BUILDING_COUNT + 1, 0,
+                       simulation->cityCondition, camera.position);
+    DrawStreetBuilding(CITY_LAYOUT_HOSPITAL_FOOTPRINT,
+                       CITY_LAYOUT_BUILDING_COUNT + 2, 0,
+                       simulation->cityCondition, camera.position);
+    DrawStreetServiceSign(CITY_LAYOUT_FIRE_STATION, "FIRE", NULL,
+                          (Color){170, 47, 56, 255});
+    DrawStreetServiceSign(CITY_LAYOUT_POLICE_STATION, "POLICE", NULL,
+                          (Color){38, 103, 185, 255});
+    DrawStreetHospitalEntrance(camera.position, simulation->cityCondition);
+    DrawStreetFurniture(simulation->cityCondition, simulation->elapsedTime);
+
+    // Civilian traffic and pedestrians are rendered from their current
+    // simulation positions and behavior states. These are not extra actors.
+    for (int i = 0; i < simulation->civilianCount; i++) {
+        Vector3 carPosition = CityPointToStreetWorld(simulation->civilianCars[i].position);
+        if (StreetPointVisibleToCamera(camera, carPosition))
+            DrawStreetCivilianCar(&simulation->civilianCars[i], i);
+    }
+    for (int i = 0; i < simulation->pedestrianCount; i++) {
+        const Pedestrian *person = &simulation->pedestrians[i];
+        Vector3 p = CityPointToStreetWorld(person->position);
+        if (!StreetPointVisibleToCamera(camera, p)) continue;
+        DrawStreetPerson(p, StreetPedestrianColor(person->state),
+                         simulation->elapsedTime * 5.0f + (float)i * 1.7f);
+        if (person->state == PEDESTRIAN_EVACUATING ||
+            person->state == PEDESTRIAN_BYSTANDING ||
+            person->state == PEDESTRIAN_RESPECTING_CORDON) {
+            DrawSphere((Vector3){p.x, 0.035f, p.z}, 0.16f,
+                       Fade(StreetPedestrianColor(person->state), 0.55f));
+        }
+    }
+
+    // Display real active routes for all viewable responders. The followed
+    // unit is brighter; other assigned units remain visible as supporting crews.
+    for (int r = 0; r < simulation->vehicleCount; r++) {
+        const Vehicle *routed = &simulation->vehicles[r];
+        Vector3 actualRouteVehicle = CityPointToStreetWorld(routed->position);
+        if (routed->activity != UNIT_RESPONDING || routed->routeCount < 2 ||
+            !StreetPointVisibleToCamera(camera, actualRouteVehicle)) continue;
+        Vector3 displayedRouteStart = StreetVehicleDisplayPosition(simulation, r);
+        Color routeColor = r == vehicleIndex ? (Color){54, 178, 255, 220} :
+                           (Color){126, 171, 196, 110};
+        for (int point = routed->routeIndex; point < routed->routeCount; point++) {
+            Vector3 from = point == routed->routeIndex ? displayedRouteStart :
+                           CityPointToStreetWorld(routed->route[point - 1]);
+            Vector3 to = CityPointToStreetWorld(routed->route[point]);
+            from.y = 0.13f;
+            to.y = 0.13f;
+            DrawLine3D(from, to, routeColor);
+        }
+    }
+
+    if (incident) {
+        // The destination marker uses the exact incident point used by the 2D
+        // map and route planner; a linked fire-building index highlights its
+        // actual footprint without moving that marker to an approximate spot.
+        DrawStreetCrosswalkForIncident(incident->position);
+        if (incident->type == INCIDENT_FIRE && !IsIncidentFinished(incident) &&
+            !incident->fireContained) {
+            Vector3 fire = CityPointToStreetWorld(incident->position);
+            float intensity = incident->status == INCIDENT_FIREFIGHTING ? 0.52f : 1.0f;
+            if (incident->fireBuildingIndex >= 0 &&
+                incident->fireBuildingIndex < CITY_LAYOUT_BUILDING_COUNT) {
+                Rectangle r = CITY_LAYOUT_BUILDINGS[incident->fireBuildingIndex];
+                fire = CityRectCenterToStreetWorld(r);
+                fire.y = 4.0f + (float)(incident->fireBuildingIndex % 4) * 0.75f;
+            } else fire.y = 1.25f;
+            float flicker = 0.12f * sinf(simulation->elapsedTime * 10.0f);
+            DrawSphere((Vector3){fire.x, fire.y + 0.42f + flicker, fire.z},
+                       0.36f * intensity, (Color){255, 114, 37, 230});
+            DrawSphere((Vector3){fire.x - 0.27f, fire.y + 0.22f - flicker,
+                                 fire.z + 0.13f},
+                       0.24f * intensity, (Color){255, 191, 63, 240});
+            DrawSphere((Vector3){fire.x + 0.25f, fire.y + 0.30f + flicker,
+                                 fire.z - 0.12f},
+                       0.26f * intensity, (Color){239, 75, 38, 225});
+            for (int puff = 0; puff < 3; puff++) {
+                float rise = fmodf(simulation->elapsedTime * 0.55f + puff * 0.42f,
+                                   1.35f);
+                float breeze = 0.12f * sinf((float)puff + simulation->elapsedTime);
+                if (simulation->cityCondition == CITY_WIND) breeze += rise * 0.55f;
+                DrawSphere((Vector3){fire.x + 0.35f + breeze,
+                                     fire.y + 0.65f + rise, fire.z - 0.18f},
+                           0.20f + rise * 0.13f,
+                           Fade((Color){87, 92, 91, 255}, 0.52f - rise * 0.12f));
+            }
+        }
+    }
+
+    for (int i = 0; i < simulation->vehicleCount; i++) {
+        const Vehicle *responder = &simulation->vehicles[i];
+        Vector3 actualPosition = CityPointToStreetWorld(responder->position);
+        if (!StreetPointVisibleToCamera(camera, actualPosition)) continue;
+        Vector3 displayPosition = StreetVehicleDisplayPosition(simulation, i);
+        DrawStreetEmergencyVehicle(responder, displayPosition, i == vehicleIndex,
+                                   simulation->elapsedTime);
+    }
+    for (int i = 0; i < simulation->incidentCount; i++) {
+        const Incident *nearIncident = &simulation->incidents[i];
+        Vector3 incidentPosition = CityPointToStreetWorld(nearIncident->position);
+        if (StreetPointVisibleToCamera(camera, incidentPosition))
+            DrawStreetOnSceneWork(simulation, i, nearIncident);
+    }
+    DrawStreetWeather(simulation->cityCondition, camera, simulation->elapsedTime);
+    EndMode3D();
+}
+
+static void RenderResponseStreetView(RenderTexture2D target,
+                                     const Simulation *simulation, int vehicleIndex,
+                                     int firstPerson,
+                                     const ResponseCameraState *cameraState)
+{
+    BeginTextureMode(target);
+    Color sky = simulation->cityCondition == CITY_NIGHT ? (Color){16, 27, 43, 255} :
+                simulation->cityCondition == CITY_FOG ? (Color){106, 132, 145, 255} :
+                simulation->cityCondition == CITY_RAIN ? (Color){70, 98, 118, 255} :
+                simulation->cityCondition == CITY_SNOW ? (Color){117, 144, 160, 255} :
+                simulation->cityCondition == CITY_WIND ? (Color){104, 133, 151, 255} :
+                                                        (Color){129, 164, 180, 255};
+    ClearBackground(sky);
+    DrawResponseStreetScene(simulation, vehicleIndex, firstPerson, cameraState);
+    EndTextureMode();
+}
+
+static void DrawResponseStreetViewTexture(RenderTexture2D source)
+{
+    Rectangle src = {0.0f, 0.0f, (float)source.texture.width,
+                     -(float)source.texture.height};
+    Rectangle dst = {mapClip.x * UI_RENDER_SCALE, mapClip.y * UI_RENDER_SCALE,
+                     mapClip.width * UI_RENDER_SCALE, mapClip.height * UI_RENDER_SCALE};
+    DrawTexturePro(source.texture, src, dst, (Vector2){0.0f, 0.0f}, 0.0f, WHITE);
+}
+
+static void DrawResponseStreetHud(const Simulation *simulation, int vehicleIndex,
+                                 int ordinal, int unitCount, int firstPerson)
+{
+    if (!simulation || vehicleIndex < 0 || vehicleIndex >= simulation->vehicleCount) return;
+    const Vehicle *vehicle = &simulation->vehicles[vehicleIndex];
+    int incidentIndex = vehicle->assignedIncident;
+    if (incidentIndex < 0 || incidentIndex >= simulation->incidentCount) return;
+    const Incident *incident = &simulation->incidents[incidentIndex];
+
+    Rectangle hud = {mapClip.x + 9, mapClip.y + mapClip.height - 53,
+                     mapClip.width - 18, 44};
+    DrawRectangleRounded(hud, 0.12f, 8, (Color){5, 20, 32, 232});
+    DrawRectangleRoundedLines(hud, 0.12f, 8, (Color){63, 125, 157, 220});
+
+    DrawText("RESPONSE UNITS", (int)mapClip.x + 15, (int)mapClip.y + 3, 8,
+             (Color){176, 204, 218, 255});
+    DrawText(firstPerson ? "FIRST PERSON VIEW" : "DRAG TO LOOK  |  WHEEL TO ZOOM",
+             (int)mapClip.x + 555, (int)mapClip.y + 3, 8,
+             (Color){176, 204, 218, 255});
+    for (int row = 0; row < unitCount && row < MAX_VEHICLES; row++) {
+        int rowVehicleIndex = ResponseUnitAt(simulation, incidentIndex, row);
+        if (rowVehicleIndex < 0) continue;
+        const Vehicle *rowVehicle = &simulation->vehicles[rowVehicleIndex];
+        Rectangle rowBounds = ResponseUnitRowBounds(row);
+        int selected = rowVehicleIndex == vehicleIndex;
+        DrawRectangleRounded(rowBounds, 0.12f, 4,
+            selected ? (Color){20, 72, 102, 242} : (Color){5, 22, 35, 220});
+        DrawRectangleRoundedLines(rowBounds, 0.12f, 4,
+            selected ? SKYBLUE : (Color){48, 86, 105, 210});
+        DrawVehicleIcon(rowVehicle->serviceType,
+            (Vector2){rowBounds.x + 12, rowBounds.y + rowBounds.height * 0.5f});
+        const char *rowState = rowVehicle->arrived || rowVehicle->activity == UNIT_ON_SCENE ?
+                               "ON SCENE" : "EN ROUTE";
+        if (rowVehicle->arrived || rowVehicle->activity == UNIT_ON_SCENE) {
+            DrawText(TextFormat("%s %d  |  %s", ServiceName(rowVehicle->serviceType),
+                     ServiceUnitNumber(simulation, rowVehicleIndex), rowState),
+                     (int)rowBounds.x + 25, (int)rowBounds.y + 8, 7,
+                     selected ? RAYWHITE : (Color){190, 205, 213, 255});
+        } else {
+            float rowEta = SimulationEstimateUnitETA(simulation, rowVehicleIndex,
+                                                      incidentIndex);
+            DrawText(rowEta >= 0.0f ? TextFormat("%s %d  |  EN ROUTE  %.1fs",
+                     ServiceName(rowVehicle->serviceType),
+                     ServiceUnitNumber(simulation, rowVehicleIndex), rowEta) :
+                     TextFormat("%s %d  |  %s", ServiceName(rowVehicle->serviceType),
+                     ServiceUnitNumber(simulation, rowVehicleIndex), rowState),
+                     (int)rowBounds.x + 25, (int)rowBounds.y + 8, 7,
+                     selected ? RAYWHITE : (Color){190, 205, 213, 255});
+        }
+    }
+
+    const char *unitState = "EN ROUTE";
+    const char *detail = "ETA --";
+    if (vehicle->arrived || vehicle->activity == UNIT_ON_SCENE) {
+        unitState = "ON SCENE";
+        detail = TextFormat("ARRIVED  |  %s", IncidentStatusName(incident->status));
+    } else {
+        float eta = SimulationEstimateUnitETA(simulation, vehicleIndex, incidentIndex);
+        detail = eta >= 0.0f ? TextFormat("ETA %.1fs  |  NEXT: CALL %.0f, %.0f", eta,
+                                          incident->position.x, incident->position.y) :
+                               TextFormat("ETA --  |  NEXT: CALL %.0f, %.0f",
+                                          incident->position.x, incident->position.y);
+    }
+    DrawText(TextFormat("%s %d  /  %s", ServiceName(vehicle->serviceType),
+                        ServiceUnitNumber(simulation, vehicleIndex),
+                        IncidentTypeName(incident->type)),
+             (int)hud.x + 12, (int)hud.y + 7, 10, RAYWHITE);
+    DrawText(TextFormat("%s  |  %s", unitState, detail),
+             (int)hud.x + 12, (int)hud.y + 24, 8,
+             vehicle->arrived ? (Color){106, 222, 164, 255} :
+                                (Color){164, 195, 210, 255});
+
+    DrawButton(responsePreviousButton, "PREV", unitCount > 1 ? BLUE : DARKGRAY);
+    DrawText(TextFormat("%d/%d", ordinal + 1, unitCount), 861, 754, 9, RAYWHITE);
+    DrawButton(responseNextButton, "NEXT", unitCount > 1 ? BLUE : DARKGRAY);
+    DrawButton(responseCameraButton, firstPerson ? "CHASE CAM" : "FIRST PERSON",
+               (Color){34, 93, 130, 255});
+    DrawButton(responseCameraResetButton, "RESET 3P",
+               (Color){34, 93, 130, 255});
+}
+
 static void DrawMapContents(const Simulation *simulation, int selectedIncident,
                            Rectangle cityView, bool showRoutes, bool showCivilianTraffic)
 {
@@ -1583,32 +3115,38 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
         if (vehicle->available || vehicle->activity == UNIT_ON_SCENE || vehicle->routeCount < 2) continue;
 
         Color routeColor = vehicle->serviceType == INCIDENT_FIRE ? RED :
-                           vehicle->serviceType == INCIDENT_CRIME ? BLUE : DARKGREEN;
+                           vehicle->serviceType == INCIDENT_CRIME ? BLUE :
+                           (Color){45, 199, 177, 255};
+        int isSelectedRoute = vehicle->assignedIncident == selectedIncident;
         Vector2 from = vehicle->position;
         for (int point = vehicle->routeIndex; point < vehicle->routeCount; point++) {
             Vector2 to = vehicle->route[point];
-            DrawLineEx(from, to, 3.0f, Fade(routeColor, 0.78f));
+            float routeWidth = isSelectedRoute ? 2.6f : 1.6f;
+            DrawLineEx(from, to, routeWidth + 1.5f, Fade((Color){7, 20, 29, 255}, 0.8f));
+            DrawLineEx(from, to, routeWidth,
+                       Fade(routeColor, isSelectedRoute ? 0.92f : 0.46f));
             from = to;
         }
     }
 
     for (int i = 0; i < simulation->vehicleCount; i++) {
         const Vehicle *vehicle = &simulation->vehicles[i];
-        DrawVehicleIcon(vehicle->serviceType, vehicle->position);
+        Vector2 markerPosition = MapVehicleDisplayPosition(simulation, i);
+        DrawVehicleIcon(vehicle->serviceType, markerPosition);
         if (vehicle->activity == UNIT_TRANSPORTING) {
             // A small passenger marker rides with the ambulance only during transport.
-            DrawRectangle((int)vehicle->position.x - 3, (int)vehicle->position.y - 9, 7, 2,
+            DrawRectangle((int)markerPosition.x - 3, (int)markerPosition.y - 9, 7, 2,
                           (Color){228, 239, 232, 255});
-            DrawCircle((int)vehicle->position.x - 1, (int)vehicle->position.y - 11, 1.5f,
+            DrawCircle((int)markerPosition.x - 1, (int)markerPosition.y - 11, 1.5f,
                        (Color){238, 199, 163, 255});
-            DrawLine((int)vehicle->position.x + 1, (int)vehicle->position.y - 9,
-                     (int)vehicle->position.x + 5, (int)vehicle->position.y - 9,
+            DrawLine((int)markerPosition.x + 1, (int)markerPosition.y - 9,
+                     (int)markerPosition.x + 5, (int)markerPosition.y - 9,
                      (Color){77, 220, 162, 255});
-            DrawText("TO HOSPITAL", (int)vehicle->position.x + 10,
-                     (int)vehicle->position.y - 11, 6, (Color){114, 224, 190, 255});
+            DrawText("TO HOSPITAL", (int)markerPosition.x + 10,
+                     (int)markerPosition.y - 11, 6, (Color){114, 224, 190, 255});
         } else if (vehicle->activity == UNIT_RETURNING)
-            DrawText("RETURNING", (int)vehicle->position.x + 10,
-                     (int)vehicle->position.y - 11, 6, (Color){190, 205, 216, 255});
+            DrawText("RETURNING", (int)markerPosition.x + 10,
+                     (int)markerPosition.y - 11, 6, (Color){190, 205, 216, 255});
     }
 
     for (int i = 0; i < simulation->incidentCount; i++) {
@@ -1740,14 +3278,30 @@ static void DrawMapContents(const Simulation *simulation, int selectedIncident,
         if (i == selectedIncident)
             DrawCircleLines((int)incident->position.x, (int)incident->position.y,
                             radius + 6.0f, GOLD);
-        DrawText(IsIncidentFinished(incident) ||
-                 incident->status == INCIDENT_SECURING ||
-                 incident->status == INCIDENT_FIREFIGHTING ||
-                 incident->status == INCIDENT_TREATING ||
-                 incident->status == INCIDENT_TRANSPORTING ? IncidentStatusName(incident->status) :
-                 TextFormat("S%d  %d/%d", incident->severity,
-                            CountArrivedUnits(simulation, i), CountRequiredUnits(incident)),
-                 (int)incident->position.x + 12, (int)incident->position.y - 8, 10, color);
+        if (i == selectedIncident) {
+            const char *status = IncidentStatusName(incident->status);
+            const char *label = IsIncidentFinished(incident) ||
+                                incident->status == INCIDENT_SECURING ||
+                                incident->status == INCIDENT_FIREFIGHTING ||
+                                incident->status == INCIDENT_TREATING ||
+                                incident->status == INCIDENT_TRANSPORTING ? status :
+                                TextFormat("SEV %d  UNITS %d/%d", incident->severity,
+                                           CountAssignedUnits(simulation, i),
+                                           CountRequiredUnits(incident));
+            const char *incidentLabel = TextFormat("CALL %02d  %s",
+                incident->callIndex >= 0 ? incident->callIndex + 1 : i + 1, label);
+            int labelWidth = MeasureUiText(incidentLabel, 8) + 10;
+            Rectangle labelBox = {incident->position.x + 15,
+                                   incident->position.y - 10,
+                                   (float)labelWidth, 18};
+            if (labelBox.x + labelBox.width > CITY_WIDTH - 4)
+                labelBox.x = incident->position.x - labelBox.width - 15;
+            DrawRectangleRounded(labelBox, 0.22f, 5, (Color){7, 22, 32, 238});
+            DrawRectangleRoundedLinesEx(labelBox, 0.22f, 5, 1.0f,
+                                        Fade(color, 0.95f));
+            DrawText(incidentLabel, (int)labelBox.x + 5,
+                     (int)labelBox.y + 4, 8, RAYWHITE);
+        }
     }
     for (int i = 0; i < simulation->callCount; i++) {
         const EmergencyCall *call = &simulation->calls[i];
@@ -1825,7 +3379,7 @@ static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
 {
     DrawModalBackdrop();
     DrawText("CONTROL ROOM SETTINGS", 510, 245, 24, RAYWHITE);
-    DrawText("Display options apply to the city map only.", 512, 280, 13,
+    DrawText("Conditions update the map and Street View together.", 512, 280, 13,
              (Color){154, 181, 198, 255});
     DrawButton(routesToggleButton, showRoutes ? "RESPONSE ROUTES  ON" : "RESPONSE ROUTES  OFF",
                showRoutes ? (Color){31, 92, 132, 255} : DARKGRAY);
@@ -1836,7 +3390,7 @@ static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
                TextFormat("CITY CONDITIONS: %s  (CLICK TO CHANGE)",
                           SimulationCityConditionName(simulation->cityCondition)),
                (Color){31, 92, 132, 255});
-    DrawText("Wind can spread severe fires; other conditions change map visibility.",
+    DrawText("Wind moves smoke and can spread fire; other weather is visual only.",
              550, 523, 10, (Color){154, 181, 198, 255});
     DrawText(TextFormat("Dispatch: %s  |  Traffic: %s",
              simulation->dispatchMode == DISPATCH_AUTOMATIC ? "Automatic" : "Manual",
@@ -1864,6 +3418,10 @@ int main(void)
     RenderTexture2D uiCanvas = LoadRenderTexture(UI_WIDTH * UI_RENDER_SCALE,
                                                   UI_HEIGHT * UI_RENDER_SCALE);
     SetTextureFilter(uiCanvas.texture, TEXTURE_FILTER_BILINEAR);
+    RenderTexture2D responseCanvas = LoadRenderTexture(
+        (int)(mapClip.width * UI_RENDER_SCALE), (int)(mapClip.height * UI_RENDER_SCALE));
+    if (responseCanvas.id != 0)
+        SetTextureFilter(responseCanvas.texture, TEXTURE_FILTER_BILINEAR);
     Camera2D renderCamera = {0};
     renderCamera.target = (Vector2){0, 0};
     renderCamera.zoom = UI_RENDER_SCALE;
@@ -1885,6 +3443,15 @@ int main(void)
     bool comparisonReady = false;
     bool showRoutes = true;
     bool showCivilianTraffic = true;
+    bool responseView = false;
+    bool responseFirstPerson = false;
+    bool responseCameraDragging = false;
+    Vector2 responseCameraLastMouse = {0};
+    ResponseCameraState responseCameraState = {0};
+    ResponseCameraReset(&responseCameraState);
+    int responseVehicleIndex = -1;
+    int responseIncidentIndex = -1;
+    int responseUnitOrdinal = 0;
     UIOverlay overlay = OVERLAY_NONE;
     int selectedCall = -1;
     int selectedIncident = -1;
@@ -1941,6 +3508,9 @@ int main(void)
         if (IsKeyPressed(KEY_A)) {
             int drillSeverity = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) ? 1 : 3;
             if (SimulationStartApartmentFireDrillAtSeverity(&simulation, drillSeverity)) {
+                responseView = false;
+                responseVehicleIndex = -1;
+                responseIncidentIndex = -1;
                 selectedCall = 0;
                 selectedIncident = -1;
                 selectedVehicleMask = 0;
@@ -1985,6 +3555,9 @@ int main(void)
             comparisonReady = true;
             selectedCall = -1;
             selectedIncident = -1;
+            responseView = false;
+            responseVehicleIndex = -1;
+            responseIncidentIndex = -1;
         }
         if (IsKeyPressed(KEY_ESCAPE)) overlay = OVERLAY_NONE;
 
@@ -1996,6 +3569,9 @@ int main(void)
             comparisonReady = false;
             selectedCall = -1;
             selectedIncident = -1;
+            responseView = false;
+            responseVehicleIndex = -1;
+            responseIncidentIndex = -1;
             selectedVehicleMask = 0;
             overlay = OVERLAY_NONE;
             overrideModalCall = -1;
@@ -2018,6 +3594,29 @@ int main(void)
         bool mouseInCanvas = ScreenToVirtualPoint(mousePosition, viewport,
                                                   UI_WIDTH, UI_HEIGHT, &mouse);
 
+        bool cameraPointerAllowed = responseView && overlay == OVERLAY_NONE &&
+            overrideModalCall < 0 && !responseFirstPerson && mouseInCanvas &&
+            StreetCameraPointerAllowed(mouse);
+        if (!responseView || overlay != OVERLAY_NONE || overrideModalCall >= 0 ||
+            responseFirstPerson || IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+            responseCameraDragging = false;
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && cameraPointerAllowed) {
+            responseCameraDragging = true;
+            responseCameraLastMouse = mouse;
+        } else if (responseCameraDragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            if (cameraPointerAllowed) {
+                ResponseCameraDrag(&responseCameraState,
+                    mouse.x - responseCameraLastMouse.x,
+                    mouse.y - responseCameraLastMouse.y);
+                responseCameraLastMouse = mouse;
+            } else {
+                responseCameraDragging = false;
+            }
+        }
+        float cameraWheel = GetMouseWheelMove();
+        if (cameraWheel != 0.0f && cameraPointerAllowed)
+            ResponseCameraZoom(&responseCameraState, cameraWheel);
+
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mouseInCanvas) {
 
             if (modalWasActive || overrideModalCall >= 0) {
@@ -2036,6 +3635,74 @@ int main(void)
                                 &overrideModalCall, &overrideModalDeadline);
                         }
                     }
+                }
+            } else if (overlay == OVERLAY_NONE &&
+                       CheckCollisionPointRec(mouse, responseViewButton)) {
+                if (responseView) {
+                    responseView = false;
+                    responseCameraDragging = false;
+                    responseVehicleIndex = -1;
+                    responseIncidentIndex = -1;
+                } else {
+                    int responseIncident = SelectedResponseIncident(&simulation, selectedCall,
+                                                                    selectedIncident);
+                    int viewableVehicle = ResponseFirstViewableUnit(&simulation,
+                                                                    responseIncident);
+                    if (viewableVehicle >= 0) {
+                        responseView = true;
+                        responseVehicleIndex = viewableVehicle;
+                        responseIncidentIndex = responseIncident;
+                        responseUnitOrdinal = ResponseUnitOrdinal(&simulation,
+                            responseIncident, viewableVehicle);
+                        responseFirstPerson = false;
+                        responseCameraDragging = false;
+                        ResponseCameraReset(&responseCameraState);
+                    }
+                }
+            } else if (overlay == OVERLAY_NONE && responseView &&
+                       CheckCollisionPointRec(mouse, responsePreviousButton)) {
+                int count = ResponseUnitCount(&simulation, responseIncidentIndex);
+                if (count > 1) {
+                    responseUnitOrdinal = (responseUnitOrdinal + count - 1) % count;
+                    responseVehicleIndex = ResponseUnitAt(&simulation,
+                        responseIncidentIndex, responseUnitOrdinal);
+                    responseCameraDragging = false;
+                    ResponseCameraReset(&responseCameraState);
+                }
+            } else if (overlay == OVERLAY_NONE && responseView &&
+                       CheckCollisionPointRec(mouse, responseNextButton)) {
+                int count = ResponseUnitCount(&simulation, responseIncidentIndex);
+                if (count > 1) {
+                    responseUnitOrdinal = (responseUnitOrdinal + 1) % count;
+                    responseVehicleIndex = ResponseUnitAt(&simulation,
+                        responseIncidentIndex, responseUnitOrdinal);
+                    responseCameraDragging = false;
+                    ResponseCameraReset(&responseCameraState);
+                }
+            } else if (overlay == OVERLAY_NONE && responseView &&
+                       CheckCollisionPointRec(mouse, responseCameraButton)) {
+                responseFirstPerson = !responseFirstPerson;
+                responseCameraDragging = false;
+            } else if (overlay == OVERLAY_NONE && responseView &&
+                       CheckCollisionPointRec(mouse, responseCameraResetButton)) {
+                responseFirstPerson = false;
+                responseCameraDragging = false;
+                ResponseCameraReset(&responseCameraState);
+            } else if (overlay == OVERLAY_NONE && responseView &&
+                       CheckCollisionPointRec(mouse, mapClip)) {
+                int count = ResponseUnitCount(&simulation, responseIncidentIndex);
+                for (int row = 0; row < count && row < MAX_VEHICLES; row++) {
+                    if (!CheckCollisionPointRec(mouse, ResponseUnitRowBounds(row))) continue;
+                    int chosen = ResponseUnitAt(&simulation, responseIncidentIndex, row);
+                    if (chosen >= 0) {
+                        if (chosen != responseVehicleIndex) {
+                            responseCameraDragging = false;
+                            ResponseCameraReset(&responseCameraState);
+                        }
+                        responseVehicleIndex = chosen;
+                        responseUnitOrdinal = row;
+                    }
+                    break;
                 }
             } else if (overlay != OVERLAY_NONE) {
                 if (CheckCollisionPointRec(mouse, modalCloseButton)) {
@@ -2153,6 +3820,9 @@ int main(void)
                 comparisonReady = false;
                 selectedCall = -1;
                 selectedIncident = -1;
+                responseView = false;
+                responseVehicleIndex = -1;
+                responseIncidentIndex = -1;
                 selectedVehicleMask = 0;
                 overlay = OVERLAY_NONE;
                 overrideModalCall = -1;
@@ -2183,6 +3853,8 @@ int main(void)
             } else if (simulation.dispatchMode == DISPATCH_MANUAL && selectedCall >= 0 &&
                        CheckCollisionPointRec(mouse, detailsPanel)) {
                 EmergencyCall *call = &simulation.calls[selectedCall];
+                int callIncidentIndex = CallIncidentIndex(&simulation, selectedCall);
+                int callNeedsUnits = ManualCallNeedsVehicleAssignment(&simulation, selectedCall);
                 if (!call->classified && !call->dispatched) {
                     const IncidentType types[] = {INCIDENT_FIRE, INCIDENT_CRIME,
                                                   INCIDENT_ACCIDENT, INCIDENT_MEDICAL};
@@ -2192,9 +3864,9 @@ int main(void)
                     for (int i = 0; i < 3; i++)
                         if (CheckCollisionPointRec(mouse, callPriorityButtons[i]))
                             manualCallSeverity = i + 1;
-                } else if (call->classified && !call->dispatched && selectedIncident >= 0 &&
-                           !IsIncidentFinished(&simulation.incidents[selectedIncident])) {
-                    Incident *incident = &simulation.incidents[selectedIncident];
+                } else if (call->classified && callNeedsUnits && selectedIncident >= 0 &&
+                           selectedIncident == callIncidentIndex) {
+                    Incident *incident = &simulation.incidents[callIncidentIndex];
                     int vehicleRows[MANUAL_VEHICLE_ROW_COUNT];
                     int rowCount = ManualVehicleRows(&simulation, incident, vehicleRows);
                     for (int row = 0; row < rowCount; row++) {
@@ -2210,7 +3882,7 @@ int main(void)
                         // its hitbox. Keep checking rows so later rows remain usable.
                     }
                 }
-            } else if (CheckCollisionPointRec(mouse, cityView)) {
+            } else if (!responseView && CheckCollisionPointRec(mouse, cityView)) {
                 Vector2 cityPoint = MapCanvasToCity(mouse, cityView);
                 int clickedIncident = FindIncidentAtPosition(&simulation, cityPoint);
                 if (clickedIncident >= 0) {
@@ -2256,6 +3928,29 @@ int main(void)
         }
 
 
+        if (responseView && SelectedResponseIncident(&simulation, selectedCall,
+                selectedIncident) != responseIncidentIndex) {
+            responseView = false;
+            responseVehicleIndex = -1;
+            responseIncidentIndex = -1;
+        } else if (responseView) {
+            int ordinal = ResponseUnitOrdinal(&simulation, responseIncidentIndex,
+                                                  responseVehicleIndex);
+            if (ordinal >= 0) {
+                responseUnitOrdinal = ordinal;
+            } else {
+                int count = ResponseUnitCount(&simulation, responseIncidentIndex);
+                if (count > 0) {
+                    responseUnitOrdinal = responseUnitOrdinal < count ? responseUnitOrdinal : count - 1;
+                    responseVehicleIndex = ResponseUnitAt(&simulation,
+                        responseIncidentIndex, responseUnitOrdinal);
+                } else {
+                    responseView = false;
+                    responseVehicleIndex = -1;
+                    responseIncidentIndex = -1;
+                }
+            }
+        }
 
         if (overrideModalCall >= 0 || modalWasActive) {
             // Modal countdowns use real time; simulation state is frozen here.
@@ -2278,6 +3973,11 @@ int main(void)
         // Input can create or reset calls after the hit-test queue was built.
         // Rebuild it before drawing so the same frame never renders stale rows.
         queueCount = BuildCallQueueOrder(&simulation, queueOrder);
+
+        if (responseView && responseCanvas.id != 0 &&
+            responseVehicleIndex >= 0 && responseVehicleIndex < simulation.vehicleCount)
+            RenderResponseStreetView(responseCanvas, &simulation, responseVehicleIndex,
+                                     responseFirstPerson, &responseCameraState);
 
 
 
@@ -2314,9 +4014,15 @@ int main(void)
         DrawText(TextFormat("TIME %05.1fs  |  CARS %d", simulation.elapsedTime,
                  simulation.civilianCount), 1315, 24, 10, (Color){179, 198, 211, 255});
         Color conditionColor = simulation.cityCondition == CITY_FOG ?
-                               (Color){184, 202, 214, 255} :
+                               (Color){174, 192, 201, 255} :
                                simulation.cityCondition == CITY_RAIN ?
                                (Color){97, 184, 226, 255} :
+                               simulation.cityCondition == CITY_SNOW ?
+                               (Color){207, 225, 236, 255} :
+                               simulation.cityCondition == CITY_NIGHT ?
+                               (Color){171, 174, 222, 255} :
+                               simulation.cityCondition == CITY_WIND ?
+                               (Color){167, 203, 218, 255} :
                                (Color){113, 204, 156, 255};
         DrawText(TextFormat("%s  |  TRAFFIC %s",
                  SimulationCityConditionName(simulation.cityCondition),
@@ -2325,29 +4031,48 @@ int main(void)
 
         DrawIncidentQueue(&simulation, queueOrder, queueCount, selectedCall);
         DrawPanel(mapPanel);
-        DrawText("CITY MAP", 320, 119, 16, RAYWHITE);
-        DrawText("Click map to log or inspect a call  |  1-4 report type", 420, 122, 11,
+        const Vehicle *trackedResponse = responseView && responseVehicleIndex >= 0 &&
+            responseVehicleIndex < simulation.vehicleCount ?
+            &simulation.vehicles[responseVehicleIndex] : NULL;
+        DrawText(responseView ? trackedResponse && trackedResponse->arrived ?
+                 "ON-SCENE RESPONSE" : "LIVE 3D RESPONSE" : "CITY MAP",
+                 320, 119, 16, RAYWHITE);
+        DrawText(responseView ? (responseFirstPerson ? "First-person vehicle view" :
+                 "Drag in the scene to look around; scroll to zoom") :
+                 "Click map to log or inspect a call  |  1-4 report type", 420, 122, 11,
                  (Color){139, 164, 179, 255});
-        DrawIncidentIcon(INCIDENT_FIRE, (Vector2){940, 125}, 7, RED);
-        DrawText("Fire", 952, 120, 10, RAYWHITE);
-        DrawVehicleIcon(INCIDENT_CRIME, (Vector2){1000, 125});
-        DrawText("Police", 1014, 120, 10, RAYWHITE);
-        DrawVehicleIcon(INCIDENT_ACCIDENT, (Vector2){1070, 125});
-        DrawText("EMS", 1084, 120, 10, RAYWHITE);
-        DrawLine(1112, 125, 1132, 125, (Color){72, 181, 255, 255});
-        DrawText("Route", 1138, 120, 10, RAYWHITE);
-        DrawCircleLines(1180, 125, 6, ORANGE);
-        DrawText("Call", 1190, 120, 10, RAYWHITE);
+        if (!responseView) DrawMapLegend();
+        if (responseView) {
+            DrawButton(responseViewButton, "BACK TO MAP", BLUE);
+        } else {
+            int responseIncident = SelectedResponseIncident(&simulation, selectedCall,
+                                                            selectedIncident);
+            int responseVehicle = ResponseFirstViewableUnit(&simulation,
+                                                            responseIncident);
+            const char *responseLabel = responseCanvas.id == 0 ? "3D VIEW UNAVAILABLE" :
+                                        responseIncident < 0 ? "SELECT CALL" :
+                                        responseVehicle >= 0 ? "VIEW RESPONSE" :
+                                                               "NO VIEWABLE UNIT";
+            DrawButton(responseViewButton, responseLabel,
+                       responseVehicle >= 0 && responseCanvas.id != 0 ? BLUE : DARKGRAY);
+        }
         DrawRectangleRounded(mapClip, 0.02f, 8, (Color){14, 27, 37, 255});
 
         // The map uses its own camera and draws directly to the 2x render
         // texture. End the UI camera before that pass, then restore it for the
         // details panel and controls so they retain the correct size/position.
         EndMode2D();
-        DrawMapContents(&simulation, selectedIncident, cityView,
-                        showRoutes, showCivilianTraffic);
+        if (responseView && responseCanvas.id != 0)
+            DrawResponseStreetViewTexture(responseCanvas);
+        else
+            DrawMapContents(&simulation, selectedIncident, cityView,
+                            showRoutes, showCivilianTraffic);
 
         BeginMode2D(renderCamera);
+        if (responseView && responseCanvas.id != 0)
+            DrawResponseStreetHud(&simulation, responseVehicleIndex,
+                responseUnitOrdinal, ResponseUnitCount(&simulation, responseIncidentIndex),
+                responseFirstPerson);
         DrawIncidentDetails(&simulation, selectedCall, comparisonReady, &comparison,
                             selectedVehicleMask, manualCallType, manualCallSeverity);
         DrawEventFeed(&simulation);
@@ -2369,9 +4094,8 @@ int main(void)
                    fastForward ? DARKGREEN : DARKGRAY);
         DrawButton(stepButton, "STEP 0.1", (Color){78, 91, 110, 255});
         int dispatchReady = 0;
-        if (simulation.dispatchMode == DISPATCH_MANUAL && selectedCall >= 0 &&
-            selectedCall < simulation.callCount && simulation.calls[selectedCall].classified &&
-            !simulation.calls[selectedCall].dispatched) {
+        if (simulation.dispatchMode == DISPATCH_MANUAL &&
+            ManualCallNeedsVehicleAssignment(&simulation, selectedCall)) {
             int incidentIndex = CallIncidentIndex(&simulation, selectedCall);
             if (incidentIndex >= 0 && incidentIndex < simulation.incidentCount) {
                 int remaining = CountRequiredUnits(&simulation.incidents[incidentIndex]) -
@@ -2423,6 +4147,7 @@ int main(void)
 
 
     UnloadRenderTexture(uiCanvas);
+    if (responseCanvas.id != 0) UnloadRenderTexture(responseCanvas);
     UnloadUiFont();
     CloseWindow();
 

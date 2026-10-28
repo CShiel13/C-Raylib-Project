@@ -1,4 +1,5 @@
 #include "simulation.h"
+#include "city_layout.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -6,8 +7,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define ROAD_NODE_COUNT 8
-#define ROAD_EDGE_COUNT 7
+#define ROAD_NODE_COUNT CITY_LAYOUT_ROAD_NODE_COUNT
+#define ROAD_EDGE_COUNT CITY_LAYOUT_ROAD_EDGE_COUNT
 
 static int TrafficCarCount(TrafficLevel level)
 {
@@ -34,6 +35,7 @@ const char *SimulationCityConditionName(CityCondition condition)
         case CITY_FOG: return "FOG";
         case CITY_WIND: return "WIND";
         case CITY_NIGHT: return "NIGHT";
+        case CITY_SNOW: return "SNOW";
         default: return "CLEAR";
     }
 }
@@ -79,21 +81,9 @@ static int ServiceUnitNumber(const Simulation *simulation, int vehicleIndex)
     return number;
 }
 
-typedef struct {
-    int from;
-    int to;
-} RoadEdge;
-
-// Road centers match the roads drawn in main.c: a central east-west road and
-// two north-south roads joined at their intersections.
-static const Vector2 roadNodes[ROAD_NODE_COUNT] = {
-    {0, 326}, {396, 326}, {771, 326}, {1100, 326},
-    {396, 80}, {396, 630}, {771, 80}, {771, 630}
-};
-
-static const RoadEdge roadEdges[ROAD_EDGE_COUNT] = {
-    {0, 1}, {1, 2}, {2, 3}, {1, 4}, {1, 5}, {2, 6}, {2, 7}
-};
+typedef CityRoadEdge RoadEdge;
+#define roadNodes CITY_LAYOUT_ROAD_NODES
+#define roadEdges CITY_LAYOUT_ROAD_EDGES
 
 
 
@@ -127,7 +117,12 @@ static Vector2 CivilianLanePosition(int fromNode, int toNode, float progress,
     float dy = (to.y - from.y) / length;
     // One lane per direction. The right-hand normal places opposing traffic
     // on opposite sides of the road automatically when direction is reversed.
-    float offset = 15.0f + shoulderOffset;
+    int edgeIndex = RoadEdgeForNodes(fromNode, toNode);
+    float halfRoad = CityLayoutRoadWidth(edgeIndex) * 0.5f;
+    float laneOffset = fminf(15.0f, halfRoad - 8.0f);
+    if (laneOffset < 0.0f) laneOffset = 0.0f;
+    float maxShoulderOffset = fmaxf(0.0f, halfRoad - laneOffset - 7.0f);
+    float offset = laneOffset + fminf(shoulderOffset, maxShoulderOffset);
     return (Vector2){from.x + (to.x - from.x) * progress - dy * offset,
                      from.y + (to.y - from.y) * progress + dx * offset};
 }
@@ -699,7 +694,7 @@ void SimulationInit(Simulation *simulation)
     simulation->cityCondition = CITY_CLEAR;
     simulation->civilianCount = 0;
     simulation->pedestrianCount = MAX_PEDESTRIANS;
-    simulation->hospitalPosition = (Vector2){900, 550};
+    simulation->hospitalPosition = CITY_LAYOUT_HOSPITAL_ENTRANCE;
     simulation->apartmentFireDrill = 0;
     simulation->evacuationEventLogged = 0;
     simulation->fireCascadeCount = 0;
@@ -757,7 +752,7 @@ void SimulationInit(Simulation *simulation)
         p->routeIndex = 0;
         p->targetNode = -1;
         float sidewalkMin[6] = {20, 453, 828, 20, 453, 828};
-        float sidewalkMax[6] = {338, 714, 1080, 338, 714, 1080};
+        float sidewalkMax[6] = {338, 714, 1094, 338, 714, 1094};
         float span = sidewalkMax[p->sidewalk] - sidewalkMin[p->sidewalk] - 14.0f;
         p->position = (Vector2){sidewalkMin[p->sidewalk] + 7.0f + (float)((i * 31) % (int)span),
                                 p->sidewalk < 3 ? 282.0f : 370.0f};
@@ -818,6 +813,10 @@ void SimulationSetTrafficLevel(Simulation *simulation, TrafficLevel level)
         car->fromNode = direction ? edge.to : edge.from;
         car->toNode = direction ? edge.from : edge.to;
         car->progress = (float)((i * 37) % 73) / 100.0f;
+        // The short East Ward exit segment is only 35 map units long. Seed its
+        // deterministic cars with enough headway so they do not begin overlapped.
+        if (edgeIndex == 3)
+            car->progress = 0.20f + (float)(i / ROAD_EDGE_COUNT) * 0.30f;
         car->speed = 40.0f + (float)((i * 17) % 21);
         car->currentSpeed = car->speed;
         car->yieldTime = 0.0f;
@@ -1081,6 +1080,8 @@ int SimulationCreateIncident(Simulation *simulation, IncidentType type, Vector2 
 
 {
 
+    if (!simulation || type < INCIDENT_FIRE || type > INCIDENT_MEDICAL) return 0;
+
     if (simulation->incidentCount >= MAX_INCIDENTS) return 0;
 
 
@@ -1299,7 +1300,7 @@ int SimulationDispatchCallVehicles(Simulation *simulation, int callIndex,
     if (!simulation || callIndex < 0 || callIndex >= simulation->callCount || !vehicleMask)
         return 0;
     EmergencyCall *call = &simulation->calls[callIndex];
-    if (!call->classified || call->dispatched || call->incidentIndex < 0 ||
+    if (!call->classified || call->incidentIndex < 0 ||
         call->incidentIndex >= simulation->incidentCount) return 0;
     Incident *incident = &simulation->incidents[call->incidentIndex];
     if (incident->status == INCIDENT_RESOLVED || incident->status == INCIDENT_FAILED)
@@ -1329,11 +1330,15 @@ int SimulationDispatchCallVehicles(Simulation *simulation, int callIndex,
 
     for (int i = 0; i < simulation->vehicleCount; i++)
         if (vehicleMask & (1u << i)) AssignVehicle(simulation, i, call->incidentIndex);
+    int wasDispatched = call->dispatched;
     incident->status = INCIDENT_DISPATCHED;
     call->dispatched = 1;
-    if (!call->mismatchRecorded) call->dispatchedAt = simulation->elapsedTime;
+    if (!wasDispatched && !call->mismatchRecorded)
+        call->dispatchedAt = simulation->elapsedTime;
     snprintf(call->decisionReason, sizeof(call->decisionReason),
-             "Manual operator dispatched all %d required response units.", selected);
+             wasDispatched ? "Manual operator dispatched %d additional required response units." :
+                             "Manual operator dispatched all %d required response units.",
+             selected);
     return selected;
 }
 
@@ -1347,7 +1352,9 @@ void SimulationProcessOperator(Simulation *simulation)
     // delayed by a lower-priority call that happened to be created first.
     for (int callIndex = 0; callIndex < simulation->callCount; callIndex++) {
         EmergencyCall *call = &simulation->calls[callIndex];
-        if (call->dispatched) continue;
+        // A wrong-service override remains committed to that initial response
+        // until the first wrong team reaches the scene and records the mismatch.
+        if (call->dispatched && call->operatorWrongService && !call->mismatchRecorded) continue;
         // AUTO OP calls awaiting a human's timed override stay queued until
         // the UI accepts a service. Existing classified calls still dispatch.
         if (call->overridePending && !call->classified) continue;
@@ -1397,6 +1404,7 @@ void SimulationProcessOperator(Simulation *simulation)
             availableTotal += available < neededByService[service] ? available : neededByService[service];
             if (available < neededByService[service]) canDispatch = 0;
         }
+        if (neededTotal == 0) continue;
         if (!canDispatch) {
             const char *level = incident->severity >= 3 ? "High" :
                                 incident->severity == 2 ? "Medium" : "Low";
@@ -1430,15 +1438,19 @@ void SimulationProcessOperator(Simulation *simulation)
             if (chosenMask & (1u << i)) chosenCount++;
         if (chosenCount != neededTotal) continue;
 
+        int wasDispatched = call->dispatched;
         for (int i = 0; i < simulation->vehicleCount; i++)
             if (chosenMask & (1u << i)) AssignVehicle(simulation, i, call->incidentIndex);
         incident->status = INCIDENT_DISPATCHED;
         call->dispatched = 1;
-        if (!call->mismatchRecorded) call->dispatchedAt = simulation->elapsedTime;
+        if (!wasDispatched && !call->mismatchRecorded)
+            call->dispatchedAt = simulation->elapsedTime;
         float eta = SimulationEstimateIncidentETA(simulation, call->incidentIndex);
         const char *level = incident->severity >= 3 ? "High" :
                             incident->severity == 2 ? "Medium" : "Low";
         snprintf(call->decisionReason, sizeof(call->decisionReason),
+                 wasDispatched ?
+                 "%s-severity incident escalated; sending %d additional required units. ETA %.1fs in %s traffic." :
                  "%s-severity incident; sending %d required units across services. ETA %.1fs in %s traffic.",
                  level, neededTotal, eta, SimulationTrafficLevelName(simulation->trafficLevel));
     }
@@ -1813,10 +1825,10 @@ typedef struct {
 static const Vector2 pedestrianRoutes[6][13] = {
     {{20,282},{345,282},{345,80},{345,282},{345,370},{20,370},{20,282}},
     {{453,282},{714,282},{720,282},{720,80},{720,282},{720,370},{714,370},{453,370},{447,370},{447,282},{453,282}},
-    {{828,282},{1080,282},{1080,80},{1080,282},{822,282},{822,370},{828,370},{1080,370},{1080,630},{1080,370},{822,370},{822,282},{828,282}},
+    {{828,282},{1094,282},{1094,80},{1094,282},{822,282},{822,370},{828,370},{1094,370},{1094,630},{1094,370},{822,370},{822,282},{828,282}},
     {{20,370},{345,370},{345,630},{345,370},{345,282},{20,282},{20,370}},
     {{453,370},{714,370},{720,370},{720,630},{720,370},{720,282},{714,282},{453,282},{447,282},{447,370},{453,370}},
-    {{828,370},{1080,370},{1080,630},{1080,370},{822,370},{822,282},{828,282},{1080,282},{1080,80},{1080,282},{822,282},{822,370},{828,370}}
+    {{828,370},{1094,370},{1094,630},{1094,370},{822,370},{822,282},{828,282},{1094,282},{1094,80},{1094,282},{822,282},{822,370},{828,370}}
 };
 
 static const int pedestrianRouteCounts[6] = {7,11,13,7,11,13};
@@ -1829,6 +1841,9 @@ static PedestrianRoute GetPedestrianRoute(int sidewalk)
 
 static int IsPedestrianCrosswalk(Vector2 a, Vector2 b)
 {
+    if (fabsf(a.y - b.y) < 0.5f &&
+        (fabsf(a.y - 282.0f) < 1.0f || fabsf(a.y - 370.0f) < 1.0f) &&
+        fminf(a.x, b.x) <= 1065.0f && fmaxf(a.x, b.x) >= 1065.0f) return 1;
     if (fabsf(a.x - b.x) > 0.5f || fabsf(a.y - b.y) < 40.0f) return 0;
     if (a.y > b.y) { Vector2 swap = a; a = b; b = swap; }
     if (a.y > 282.0f || b.y < 370.0f) return 0;
@@ -1942,7 +1957,8 @@ static void AdvancePedestrianRoute(const Simulation *simulation, Pedestrian *per
         }
         int crossing = IsPedestrianCrosswalk(a, b);
         if (crossing && !person->crossingActive) {
-            if (!PedestrianCrossingClear(simulation, a.x)) {
+            float crossingX = fabsf(a.y - b.y) < 0.5f ? 1065.0f : a.x;
+            if (!PedestrianCrossingClear(simulation, crossingX)) {
                 person->state = PEDESTRIAN_WAITING_TO_CROSS;
                 person->position = PedestrianRoutePosition(person);
                 return;
@@ -2100,7 +2116,7 @@ void SimulationUpdate(Simulation *simulation, float deltaTime)
 
 {
 
-    if (deltaTime <= 0.0f) return;
+    if (!simulation || !isfinite(deltaTime) || deltaTime <= 0.0f) return;
 
     simulation->elapsedTime += deltaTime;
 

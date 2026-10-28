@@ -60,6 +60,7 @@ typedef enum {
     CITY_FOG,
     CITY_WIND,
     CITY_NIGHT,
+    CITY_SNOW,
     CITY_CONDITION_COUNT
 } CityCondition;
 

@@ -13,6 +13,14 @@ static int FindEvent(const Simulation *sim, const char *phrase)
 
 static void CheckConditionsAndReset(void)
 {
+    const char *conditionNames[CITY_CONDITION_COUNT] = {
+        "CLEAR", "RAIN", "FOG", "WIND", "NIGHT", "SNOW"
+    };
+    assert(CITY_CONDITION_COUNT == 6);
+    for (int condition = CITY_CLEAR; condition < CITY_CONDITION_COUNT; condition++)
+        assert(strcmp(SimulationCityConditionName((CityCondition)condition),
+                      conditionNames[condition]) == 0);
+
     Simulation sim;
     SimulationInit(&sim);
     assert(sim.cityCondition == CITY_CLEAR);
@@ -24,8 +32,12 @@ static void CheckConditionsAndReset(void)
     SimulationSetCityCondition(&sim, CITY_FOG);
     assert(sim.cityCondition == CITY_FOG);
     assert(strstr(sim.events[1].message, "FOG") != NULL);
+    SimulationSetCityCondition(&sim, CITY_SNOW);
+    assert(sim.cityCondition == CITY_SNOW);
+    assert(strcmp(SimulationCityConditionName(sim.cityCondition), "SNOW") == 0);
+    assert(strstr(sim.events[2].message, "SNOW") != NULL);
     SimulationSetCityCondition(&sim, CITY_CLEAR);
-    assert(sim.cityCondition == CITY_CLEAR && sim.eventCount == 3);
+    assert(sim.cityCondition == CITY_CLEAR && sim.eventCount == 4);
     SimulationInit(&sim);
     assert(sim.cityCondition == CITY_CLEAR && sim.eventCount == 0);
     assert(SimulationCreateIncident(&sim, INCIDENT_MEDICAL, (Vector2){770, 270}));
@@ -33,6 +45,8 @@ static void CheckConditionsAndReset(void)
     SimulationSetCityCondition(&sim, CITY_RAIN);
     assert(SimulationEstimateIncidentETA(&sim, 0) == clearEta);
     SimulationSetCityCondition(&sim, CITY_FOG);
+    assert(SimulationEstimateIncidentETA(&sim, 0) == clearEta);
+    SimulationSetCityCondition(&sim, CITY_SNOW);
     assert(SimulationEstimateIncidentETA(&sim, 0) == clearEta);
 }
 

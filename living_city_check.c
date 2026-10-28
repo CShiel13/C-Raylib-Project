@@ -1,6 +1,8 @@
 #include "simulation.h"
+#include "city_layout.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -8,6 +10,17 @@ static int HasEvent(const Simulation *sim, const char *fragment)
 {
     for (int i = 0; i < sim->eventCount; i++)
         if (strstr(sim->events[i].message, fragment)) return 1;
+    return 0;
+}
+
+static int IsOnPedestrianPavement(Vector2 p)
+{
+    if ((fabsf(p.y - 282.0f) < 0.01f || fabsf(p.y - 370.0f) < 0.01f) &&
+        p.x >= 20.0f && p.x <= 1094.0f) return 1;
+    if ((fabsf(p.x - 345.0f) < 0.01f || fabsf(p.x - 720.0f) < 0.01f ||
+         fabsf(p.x - 1094.0f) < 0.01f) && p.y >= 80.0f && p.y <= 630.0f) return 1;
+    if ((fabsf(p.x - 447.0f) < 0.01f || fabsf(p.x - 822.0f) < 0.01f) &&
+        p.y >= 282.0f && p.y <= 370.0f) return 1;
     return 0;
 }
 
@@ -48,6 +61,13 @@ int main(void)
 
     Simulation sim;
     SimulationInit(&sim);
+    assert(sim.hospitalPosition.x == CITY_LAYOUT_HOSPITAL_ENTRANCE.x &&
+           sim.hospitalPosition.y == CITY_LAYOUT_HOSPITAL_ENTRANCE.y);
+    assert(sim.hospitalPosition.x > CITY_LAYOUT_HOSPITAL_FOOTPRINT.x +
+                                      CITY_LAYOUT_HOSPITAL_FOOTPRINT.width);
+    assert(sim.hospitalPosition.x >= CITY_LAYOUT_HOSPITAL_BAY.x &&
+           sim.hospitalPosition.x <= CITY_LAYOUT_HOSPITAL_BAY.x +
+                                      CITY_LAYOUT_HOSPITAL_BAY.width);
     assert(sim.pedestrianCount == MAX_PEDESTRIANS);
     assert(SimulationStartApartmentFireDrill(&sim));
     assert(sim.apartmentFireDrill && sim.callCount == 1);
@@ -67,21 +87,36 @@ int main(void)
 
     int sawSecurity = 0, sawFirefighting = 0, sawTreatment = 0, sawTransport = 0;
     int sawEvacuation = 0;
+    int sawTransportRouteToHospital = 0;
     for (int step = 0; step < 1000 && !sim.calls[0].feedbackReady; step++) {
         SimulationUpdate(&sim, 0.1f);
         sawSecurity |= fire->status == INCIDENT_SECURING;
         sawFirefighting |= fire->status == INCIDENT_FIREFIGHTING;
         sawTreatment |= fire->status == INCIDENT_TREATING;
         sawTransport |= fire->status == INCIDENT_TRANSPORTING;
-        sawEvacuation |= HasEvent(&sim, "evacuating along sidewalks");
+        if (fire->status == INCIDENT_TRANSPORTING) {
+            for (int unit = 0; unit < sim.vehicleCount; unit++) {
+                const Vehicle *ambulance = &sim.vehicles[unit];
+                if (ambulance->assignedIncident != incidentIndex ||
+                    ambulance->activity != UNIT_TRANSPORTING ||
+                    ambulance->routeCount <= 0) continue;
+                Vector2 destination = ambulance->route[ambulance->routeCount - 1];
+                assert(fabsf(destination.x - CITY_LAYOUT_HOSPITAL_ENTRANCE.x) < 0.01f);
+                assert(fabsf(destination.y - CITY_LAYOUT_HOSPITAL_ENTRANCE.y) < 0.01f);
+                sawTransportRouteToHospital = 1;
+            }
+        }
+        for (int p = 0; p < sim.pedestrianCount; p++)
+            sawEvacuation |= sim.pedestrians[p].evacuating ||
+                             sim.pedestrians[p].state == PEDESTRIAN_EVACUATING;
         for (int p = 0; p < sim.pedestrianCount; p++) {
-            assert(sim.pedestrians[p].position.x >= 0.0f && sim.pedestrians[p].position.x <= 1100.0f);
-            assert(sim.pedestrians[p].position.y == 282.0f || sim.pedestrians[p].position.y == 370.0f);
-            assert(sim.pedestrians[p].position.x >= 20.0f);
-            assert(sim.pedestrians[p].position.x <= 1080.0f);
+            assert(sim.pedestrians[p].position.x >= 0.0f && sim.pedestrians[p].position.x <= CITY_LAYOUT_WIDTH);
+            assert(sim.pedestrians[p].position.y >= 80.0f && sim.pedestrians[p].position.y <= 630.0f);
+            assert(IsOnPedestrianPavement(sim.pedestrians[p].position));
         }
     }
     assert(sawSecurity && sawFirefighting && sawTreatment && sawTransport);
+    assert(sawTransportRouteToHospital);
     assert(fire->status == INCIDENT_RESOLVED);
     assert(sim.calls[0].feedbackReady);
     assert(fire->transportComplete);

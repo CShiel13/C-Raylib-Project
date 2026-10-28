@@ -1,4 +1,5 @@
 #include "simulation.h"
+#include "city_layout.h"
 
 #include <assert.h>
 #include <math.h>
@@ -42,12 +43,14 @@ int main(void)
     Simulation denseRun;
     SimulationInit(&denseRun);
     SimulationSetTrafficLevel(&denseRun, TRAFFIC_HEAVY);
-    const int roadEnds[7][2] = {{0,1},{1,2},{2,3},{1,4},{1,5},{2,6},{2,7}};
-    int hasBothDirections[7][2] = {{0}};
+    const CityRoadEdge *roadEnds = CITY_LAYOUT_ROAD_EDGES;
+    const Vector2 *nodes = CITY_LAYOUT_ROAD_NODES;
+    int hasBothDirections[CITY_LAYOUT_ROAD_EDGE_COUNT][2] = {{0}};
     for (int step = 0; step < 1200; step++) {
         SimulationUpdate(&denseRun, 0.1f);
-        for (int node = 1; node <= 2; node++) {
-            Vector2 junction = node == 1 ? (Vector2){396, 326} : (Vector2){771, 326};
+        const int junctionNodes[] = {1, 2, 9};
+        for (int junctionIndex = 0; junctionIndex < 3; junctionIndex++) {
+            Vector2 junction = nodes[junctionNodes[junctionIndex]];
             int inside = 0;
             for (int i = 0; i < denseRun.civilianCount; i++) {
                 float d = hypotf(denseRun.civilianCars[i].position.x - junction.x,
@@ -58,8 +61,6 @@ int main(void)
         }
         for (int i = 0; i < denseRun.civilianCount; i++) {
             CivilianCar *car = &denseRun.civilianCars[i];
-            const Vector2 nodes[8] = {{0,326},{396,326},{771,326},{1100,326},
-                                      {396,80},{396,630},{771,80},{771,630}};
             Vector2 a = nodes[car->fromNode], b = nodes[car->toNode];
             float length = hypotf(b.x - a.x, b.y - a.y);
             Vector2 center = {a.x + (b.x-a.x)*car->progress, a.y + (b.y-a.y)*car->progress};
@@ -67,14 +68,15 @@ int main(void)
                            (car->position.y-center.y)*((b.x-a.x)/length);
             assert(fabsf(offset - 15.0f) < 0.02f);
             int edge = -1;
-            for (int e = 0; e < 7; e++)
-                if ((car->fromNode == roadEnds[e][0] && car->toNode == roadEnds[e][1]) ||
-                    (car->fromNode == roadEnds[e][1] && car->toNode == roadEnds[e][0])) edge = e;
+            for (int e = 0; e < CITY_LAYOUT_ROAD_EDGE_COUNT; e++)
+                if ((car->fromNode == roadEnds[e].from && car->toNode == roadEnds[e].to) ||
+                    (car->fromNode == roadEnds[e].to && car->toNode == roadEnds[e].from)) edge = e;
             assert(edge >= 0);
-            int direction = car->fromNode == roadEnds[edge][0] ? 0 : 1;
+            int direction = car->fromNode == roadEnds[edge].from ? 0 : 1;
             hasBothDirections[edge][direction] = 1;
             float canonicalOffset = direction == 0 ? offset : -offset;
-            assert(fabsf(canonicalOffset - (direction == 0 ? 15.0f : -15.0f)) < 0.02f);
+            float expectedOffset = fminf(15.0f, CityLayoutRoadWidth(edge) * 0.5f - 8.0f);
+            assert(fabsf(canonicalOffset - (direction == 0 ? expectedOffset : -expectedOffset)) < 0.02f);
             for (int j = i + 1; j < denseRun.civilianCount; j++) {
                 CivilianCar *other = &denseRun.civilianCars[j];
                 if (car->fromNode != other->fromNode || car->toNode != other->toNode ||
@@ -84,7 +86,7 @@ int main(void)
             }
         }
     }
-    for (int edge = 0; edge < 7; edge++)
+    for (int edge = 0; edge < CITY_LAYOUT_ROAD_EDGE_COUNT; edge++)
         assert(hasBothDirections[edge][0] && hasBothDirections[edge][1]);
 
     Simulation first, repeat;
