@@ -74,7 +74,16 @@ void SimulationSetAutoIncidents(Simulation *simulation, int enabled, unsigned in
 {
     if (!simulation) return;
     int turnOn = enabled != 0;
-    if (turnOn == simulation->autoIncidentsEnabled) return;
+    if (turnOn == simulation->autoIncidentsEnabled) {
+        // Also allow callers and regression checks to restart the sequence with
+        // a known seed while generation is already enabled.
+        if (turnOn && seed != 0u) {
+            simulation->autoIncidentRandomState = seed;
+            simulation->autoIncidentNextAt = simulation->elapsedTime +
+                                             AutoIncidentRandomInterval(simulation);
+        }
+        return;
+    }
     simulation->autoIncidentsEnabled = turnOn;
     simulation->autoIncidentCapacitySuspended = 0;
     if (turnOn) {
@@ -870,6 +879,12 @@ void SimulationInit(Simulation *simulation)
         if (p->routeProgress > 1.0f) p->routeProgress = 1.0f;
     }
     SimulationSetTrafficLevel(simulation, TRAFFIC_LIGHT);
+    // Start timed call generation by default without emitting a user action
+    // event during initialization or reset.
+    simulation->autoIncidentsEnabled = 1;
+    simulation->autoIncidentRandomState = AUTO_INCIDENT_DEFAULT_SEED;
+    simulation->autoIncidentNextAt = simulation->elapsedTime +
+                                     AutoIncidentRandomInterval(simulation);
 
 }
 

@@ -3,6 +3,7 @@
 #include "response_camera.h"
 #include "manual_selection.h"
 #include "ui_controls.h"
+#include "simulation.h"
 
 #include <assert.h>
 #include <math.h>
@@ -21,8 +22,9 @@ static void CheckWindow(int width, int height)
         ResponseViewButtonBounds(), {730,548,58,34}, {792,548,58,34},
         {854,548,148,34}, {1006,548,96,34}, {20,150,352,80},
         {20,236,352,80}, {20,322,352,80},
-        {470,256,680,56}, {470,324,680,56}, {470,392,680,56},
-        {470,460,680,56}, {1020,708,140,44}, {390,110,820,680},
+        SettingsRoutesToggleBounds(), SettingsCivilianToggleBounds(),
+        SettingsCityConditionBounds(), SettingsAutoIncidentsBounds(),
+        SettingsMapCallToggleBounds(), {1020,708,140,44}, {390,110,820,680},
         {1224,268,170,34}, {1404,268,170,34},
         {1224,306,170,34}, {1404,306,170,34},
         {1224,360,108,34}, {1340,360,108,34}, {1456,360,118,34},
@@ -67,8 +69,10 @@ static void CheckWindow(int width, int height)
 
     Rectangle nextType = NextCallTypeSelectorBounds();
     Rectangle helpViewport = SettingsHelpViewportBounds();
+    Rectangle mapCallToggle = SettingsMapCallToggleBounds();
     Rectangle legend = MapLegendBounds();
     assert(!CheckCollisionRecs(ResponseViewButtonBounds(), legend));
+    assert(mapCallToggle.y + mapCallToggle.height < helpViewport.y);
     Rectangle nextTypeScreen = {viewport.x + nextType.x * viewport.width / 1600.0f,
                                 viewport.y + nextType.y * viewport.height / 900.0f,
                                 nextType.width * viewport.width / 1600.0f,
@@ -179,6 +183,28 @@ static void CheckManualUnitRows(void)
     assert(mask == 0);
 }
 
+static void CheckMapCreationToggle(void)
+{
+    assert(MAP_CALL_CREATION_DEFAULT == 0);
+    assert(MapClickShouldCreateCall(1, -1, -1));
+    assert(!MapClickShouldCreateCall(0, -1, -1));
+    assert(!MapClickShouldCreateCall(1, 2, -1));
+    assert(!MapClickShouldCreateCall(1, -1, 3));
+    assert(ManualIncomingNoticeNeeded(1, 2, 3));
+    assert(!ManualIncomingNoticeNeeded(0, 2, 3));
+    assert(!ManualIncomingNoticeNeeded(1, 3, 3));
+
+    Simulation simulation;
+    SimulationInit(&simulation);
+    int before = simulation.callCount;
+    if (MapClickShouldCreateCall(0, -1, -1))
+        SimulationCreateCall(&simulation, (Vector2){250, 250}, "Map test call.");
+    assert(simulation.callCount == before);
+    if (MapClickShouldCreateCall(1, -1, -1))
+        SimulationCreateCall(&simulation, (Vector2){250, 250}, "Map test call.");
+    assert(simulation.callCount == before + 1);
+}
+
 int main(void)
 {
     // Keep the same shared manual hit-test helpers linked into this geometry
@@ -203,6 +229,7 @@ int main(void)
     CheckWindow(1440, 810);
     CheckWindow(1920, 1080);
     CheckManualUnitRows();
+    CheckMapCreationToggle();
     puts("resized-window click mapping and manual multi-unit selection checks passed");
     return 0;
 }

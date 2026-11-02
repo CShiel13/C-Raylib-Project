@@ -38,14 +38,19 @@ static void CheckDisabledAndReset(void)
 {
     Simulation simulation;
     SimulationInit(&simulation);
+    assert(simulation.autoIncidentsEnabled);
+    float initial = SimulationAutoIncidentSecondsUntilNext(&simulation);
+    assert(initial >= 5.0f && initial <= 30.0f);
+    SimulationSetAutoIncidents(&simulation, 0, 0u);
     assert(!simulation.autoIncidentsEnabled);
     Advance(&simulation, 80.0f);
     assert(simulation.callCount == 0);
     SimulationSetAutoIncidents(&simulation, 1, AUTO_INCIDENT_DEFAULT_SEED);
     assert(simulation.autoIncidentsEnabled);
     SimulationInit(&simulation);
-    assert(!simulation.autoIncidentsEnabled);
-    assert(SimulationAutoIncidentSecondsUntilNext(&simulation) < 0.0f);
+    assert(simulation.autoIncidentsEnabled);
+    float afterReset = SimulationAutoIncidentSecondsUntilNext(&simulation);
+    assert(afterReset >= 5.0f && afterReset <= 30.0f);
 }
 
 static void CheckIntervalsAndPauseSemantics(void)

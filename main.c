@@ -115,10 +115,6 @@ static const Rectangle modalCloseButton = {1000, 638, 100, 38};
 // Settings use the roomier panel spacing from the supplied polished UI copy.
 static const Rectangle settingsPanel = {390, 110, 820, 680};
 static const Rectangle settingsCloseButton = {1020, 708, 140, 44};
-static const Rectangle routesToggleButton = {470, 256, 680, 56};
-static const Rectangle civilianToggleButton = {470, 324, 680, 56};
-static const Rectangle cityConditionButton = {470, 392, 680, 56};
-static const Rectangle autoIncidentsButton = {470, 460, 680, 56};
 static const Rectangle operatorModalPanel = {430, 175, 740, 550};
 static const Rectangle operatorFireButton = {470, 625, 210, 54};
 static const Rectangle operatorPoliceButton = {695, 625, 210, 54};
@@ -379,6 +375,56 @@ static void DrawIncidentIcon(IncidentType type, Vector2 center, float size, Colo
     }
 }
 
+static void DrawManualServiceIcon(IncidentType service, Vector2 center, float size)
+{
+    if (service == INCIDENT_FIRE) {
+        DrawCircleV(center, size + 2.0f, (Color){91, 34, 40, 255});
+        DrawIncidentIcon(INCIDENT_FIRE, center, size * 0.78f,
+                         (Color){255, 145, 67, 255});
+    } else if (service == INCIDENT_CRIME) {
+        DrawCircleV(center, size + 2.0f, (Color){25, 72, 119, 255});
+        DrawIncidentIcon(INCIDENT_CRIME, center, size * 0.78f,
+                         (Color){225, 240, 255, 255});
+    } else if (service == INCIDENT_ACCIDENT) {
+        DrawCircleV(center, size + 2.0f, (Color){112, 75, 25, 255});
+        DrawTriangle((Vector2){center.x, center.y - size},
+                     (Vector2){center.x - size * 0.9f, center.y + size * 0.7f},
+                     (Vector2){center.x + size * 0.9f, center.y + size * 0.7f},
+                     (Color){255, 188, 73, 255});
+        DrawLineEx((Vector2){center.x, center.y - size * 0.35f},
+                   (Vector2){center.x, center.y + size * 0.2f}, 1.7f,
+                   (Color){60, 43, 20, 255});
+        DrawCircleV((Vector2){center.x, center.y + size * 0.45f}, 1.0f,
+                    (Color){60, 43, 20, 255});
+    } else {
+        DrawCircleV(center, size + 2.0f, (Color){24, 113, 91, 255});
+        float arm = size * 0.42f;
+        DrawRectangle((int)(center.x - arm * 0.5f), (int)(center.y - size * 0.72f),
+                      (int)arm, (int)(size * 1.44f), RAYWHITE);
+        DrawRectangle((int)(center.x - size * 0.72f), (int)(center.y - arm * 0.5f),
+                      (int)(size * 1.44f), (int)arm, RAYWHITE);
+    }
+}
+
+static void DrawManualCallToast(const char *notice)
+{
+    if (!notice || !notice[0]) return;
+    Rectangle toast = {500, 145, 530, 72};
+    DrawRectangleRounded(toast, 0.12f, 10, (Color){7, 29, 43, 248});
+    DrawRectangleRoundedLinesEx(toast, 0.12f, 10, 2.0f,
+                                (Color){255, 183, 65, 255});
+    DrawRectangleRounded((Rectangle){toast.x, toast.y, 7, toast.height},
+                         0.3f, 6, (Color){255, 183, 65, 255});
+    DrawCircleV((Vector2){toast.x + 29, toast.y + 25}, 10.0f,
+                (Color){116, 76, 26, 255});
+    DrawText("!", (int)toast.x + 26, (int)toast.y + 18, 14,
+             (Color){255, 232, 184, 255});
+    DrawText("INCOMING CALL - MANUAL OPERATOR", (int)toast.x + 48,
+             (int)toast.y + 12, 13, (Color){255, 208, 125, 255});
+    DrawText(TextFormat("%s  |  OPEN THE INCIDENT QUEUE", notice),
+             (int)toast.x + 48, (int)toast.y + 39, 10, RAYWHITE);
+}
+
 static void DrawActiveIncidentEffect(const Incident *incident, int index, float time,
                                      CityCondition condition)
 {
@@ -545,6 +591,12 @@ static void DrawVehicleIcon(IncidentType service, Vector2 center)
     }
     DrawRectangleLinesEx((Rectangle){center.x - 10, center.y - 5, 20, 10},
                          1.0f, (Color){25, 38, 50, 255});
+}
+
+static void DrawManualUnitBadge(IncidentType service, Vector2 center)
+{
+    IncidentType iconType = service == INCIDENT_ACCIDENT ? INCIDENT_MEDICAL : service;
+    DrawManualServiceIcon(iconType, center, 8.0f);
 }
 
 static void DrawCivilianCar(const CivilianCar *car)
@@ -1069,11 +1121,13 @@ static int DrawButtonIcon(Rectangle rect, const char *label)
 {
     float cy = rect.y + rect.height * 0.5f;
     if (strstr(label, "FIRE")) {
-        DrawIncidentIcon(INCIDENT_FIRE, (Vector2){rect.x + 13, cy}, 6, RAYWHITE);
+        DrawManualServiceIcon(INCIDENT_FIRE, (Vector2){rect.x + 12, cy}, 6.0f);
     } else if (strstr(label, "POLICE")) {
-        DrawIncidentIcon(INCIDENT_CRIME, (Vector2){rect.x + 13, cy}, 6, RAYWHITE);
+        DrawManualServiceIcon(INCIDENT_CRIME, (Vector2){rect.x + 12, cy}, 6.0f);
     } else if (strstr(label, "AMBULANCE") || strstr(label, "MEDICAL")) {
-        DrawIncidentIcon(INCIDENT_MEDICAL, (Vector2){rect.x + 13, cy}, 6, RAYWHITE);
+        DrawManualServiceIcon(INCIDENT_MEDICAL, (Vector2){rect.x + 12, cy}, 6.0f);
+    } else if (strstr(label, "ACCIDENT")) {
+        DrawManualServiceIcon(INCIDENT_ACCIDENT, (Vector2){rect.x + 12, cy}, 6.0f);
     } else if (strstr(label, "PAUSE")) {
         DrawRectangleRounded((Rectangle){rect.x + 9, cy - 6, 4, 12}, 0.3f, 3, RAYWHITE);
         DrawRectangleRounded((Rectangle){rect.x + 16, cy - 6, 4, 12}, 0.3f, 3, RAYWHITE);
@@ -1441,7 +1495,8 @@ static void DrawNextCallTypeSelector(IncidentType selectedType)
 }
 
 static void DrawIncidentQueue(const Simulation *simulation, const int order[MAX_CALLS],
-                              int orderCount, int selectedCall)
+                              int orderCount, int selectedCall, int createCallOnMap,
+                              const char *manualCallNotice)
 {
     DrawPanel(queuePanel);
     int waiting = 0;
@@ -1452,11 +1507,21 @@ static void DrawIncidentQueue(const Simulation *simulation, const int order[MAX_
              (Color){134, 160, 177, 255});
     DrawText(simulation->dispatchMode == DISPATCH_AUTOMATIC ? "AUTO" : "MANUAL",
              318, 126, 9, simulation->dispatchMode == DISPATCH_AUTOMATIC ? GREEN : SKYBLUE);
+    if (manualCallNotice && manualCallNotice[0]) {
+        Rectangle notice = {278, 98, 92, 20};
+        DrawRectangleRounded(notice, 0.25f, 6, (Color){111, 73, 20, 255});
+        DrawRectangleRoundedLinesEx(notice, 0.25f, 6, 1.0f,
+                                    (Color){255, 190, 81, 230});
+        DrawText(manualCallNotice, (int)notice.x + 5, (int)notice.y + 6, 7,
+                 (Color){255, 226, 161, 255});
+    }
 
     int visible = orderCount < QUEUE_VISIBLE ? orderCount : QUEUE_VISIBLE;
     if (visible == 0) {
         DrawText("No calls received yet", 34, 166, 13, (Color){160, 181, 195, 255});
-        DrawText("Click the map to log a call.", 34, 188, 11, (Color){116, 142, 159, 255});
+        DrawText(createCallOnMap ? "Click the map to create a call." :
+                 "Map clicks inspect only; timed calls stay active.",
+                 34, 188, 10, (Color){116, 142, 159, 255});
     } else {
         for (int row = 0; row < visible; row++) {
             int callIndex = order[row];
@@ -1751,19 +1816,34 @@ static void DrawIncidentDetails(const Simulation *simulation, int selectedCall,
                     DrawRectangleRounded(vehicleRow, 0.15f, 4,
                         checked ? (Color){29, 68, 91, 255} :
                         selectable ? (Color){18, 38, 54, 255} : (Color){27, 34, 43, 255});
-                    DrawVehicleIcon(vehicle->serviceType, (Vector2){1239, (float)y + 7});
+                    DrawManualUnitBadge(vehicle->serviceType,
+                                        (Vector2){1239, (float)y + vehicleRow.height * 0.5f});
+                    const char *unitStatus = checked ? "SELECTED" :
+                                             vehicle->available ? "AVAILABLE" : "BUSY";
                     DrawText(TextFormat("%s %d  %s", ServiceName(vehicle->serviceType),
                              ServiceUnitNumber(simulation, i),
-                             selectable ? "AVAILABLE" : vehicle->available ? "CALL CLOSED" : "BUSY"),
+                             unitStatus),
                              1258, y + 2, 8,
+                             checked ? (Color){143, 224, 255, 255} :
                              selectable ? (Color){196, 211, 220, 255} : GRAY);
                     if (selectable) {
                         float unitEta = SimulationEstimateUnitETA(simulation, i, incidentIndex);
                         DrawText(unitEta < 0.0f ? "ETA --" : TextFormat("ETA %.1fs", unitEta),
                                  1446, y + 2, 8, (Color){107, 190, 238, 255});
-                        DrawRectangleLinesEx(ManualVehicleCheckboxBounds(row), 1,
-                                             checked ? SKYBLUE : (Color){105, 129, 143, 255});
-                        if (checked) DrawText("x", 1509, y, 10, SKYBLUE);
+                        Rectangle checkbox = ManualVehicleCheckboxBounds(row);
+                        DrawRectangleRounded(checkbox, 0.20f, 4,
+                            checked ? (Color){17, 112, 160, 255} : (Color){9, 25, 38, 255});
+                        DrawRectangleRoundedLinesEx(checkbox, 0.20f, 4, 1.2f,
+                            checked ? (Color){117, 216, 255, 255} :
+                                      (Color){105, 129, 143, 255});
+                        if (checked) {
+                            DrawLineEx((Vector2){checkbox.x + 4, checkbox.y + 11},
+                                       (Vector2){checkbox.x + 8, checkbox.y + 15},
+                                       2.0f, RAYWHITE);
+                            DrawLineEx((Vector2){checkbox.x + 8, checkbox.y + 15},
+                                       (Vector2){checkbox.x + 17, checkbox.y + 5},
+                                       2.0f, RAYWHITE);
+                        }
                     } else {
                         DrawText(vehicle->available ? "LIMIT" : "IN USE",
                                  1474, y + 2, 8, GRAY);
@@ -3575,19 +3655,21 @@ static void DrawReportsOverlay(const Simulation *simulation)
 }
 
 static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
-                                const Simulation *simulation, int helpScroll)
+                                int createCallOnMap, const Simulation *simulation,
+                                int helpScroll)
 {
     DrawRectangle(0, 0, UI_WIDTH, UI_HEIGHT, (Color){0, 0, 0, 155});
     DrawPanel(settingsPanel);
     DrawText("CONTROL ROOM SETTINGS", 460, 156, 30, RAYWHITE);
     DrawText("Conditions update the map and Street View together.", 462, 196, 16,
              (Color){154, 181, 198, 255});
-    DrawButton(routesToggleButton, showRoutes ? "RESPONSE ROUTES  ON" : "RESPONSE ROUTES  OFF",
+    DrawButton(SettingsRoutesToggleBounds(),
+               showRoutes ? "RESPONSE ROUTES  ON" : "RESPONSE ROUTES  OFF",
                showRoutes ? (Color){31, 92, 132, 255} : DARKGRAY);
-    DrawButton(civilianToggleButton,
+    DrawButton(SettingsCivilianToggleBounds(),
                showCivilianTraffic ? "CIVILIAN TRAFFIC  ON" : "CIVILIAN TRAFFIC  OFF",
                showCivilianTraffic ? (Color){31, 92, 132, 255} : DARKGRAY);
-    DrawButton(cityConditionButton,
+    DrawButton(SettingsCityConditionBounds(),
                TextFormat("CITY CONDITIONS: %s  (CLICK TO CHANGE)",
                           SimulationCityConditionName(simulation->cityCondition)),
                (Color){31, 92, 132, 255});
@@ -3597,9 +3679,13 @@ static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
         TextFormat("AUTO INCIDENTS: ON  |  NEXT CALL IN %.1fs",
                    SimulationAutoIncidentSecondsUntilNext(simulation)) :
         "AUTO INCIDENTS: OFF";
-    DrawButton(autoIncidentsButton, autoLabel,
+    DrawButton(SettingsAutoIncidentsBounds(), autoLabel,
                simulation->autoIncidentsEnabled ? (Color){24, 112, 87, 255} :
                                                   (Color){31, 92, 132, 255});
+    DrawButton(SettingsMapCallToggleBounds(), createCallOnMap ?
+               "CREATE CALL ON MAP: ON  |  EMPTY MAP CLICK CREATES A CALL" :
+               "CREATE CALL ON MAP: OFF  |  MAP CLICKS INSPECT ONLY",
+               createCallOnMap ? (Color){24, 112, 87, 255} : (Color){31, 92, 132, 255});
     DrawText("CONTROLS & HELP  ·  SCROLL INSIDE THIS PANEL FOR MORE",
              472, 529, 12, (Color){107, 190, 238, 255});
     Rectangle helpPanel = {452, 550, 696, 146};
@@ -3611,7 +3697,7 @@ static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
         "A starts the apartment-fire drill; Shift+A starts its minor version.",
         "Space pause/resume · S slow · F fast · N step 0.1s · T traffic · W weather.",
         "M simulate queue · C compare strategies · R reset · Esc close overlays.",
-        "MAP  Click an empty map location to create a call using NEXT CALL TYPE.",
+        "MAP  Empty clicks create a call only when CREATE CALL ON MAP is ON.",
         "Click a call/incident marker to inspect it; click a queue card to select or clear it.",
         "MANUAL  Classify the call and priority, select suitable units, then dispatch.",
         "AUTO  The operator classifies and dispatches; timed human override is Auto-only.",
@@ -3622,7 +3708,7 @@ static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
         "BOTTOM BAR  Compare, Pause/Resume, Slow, 1x, Fast, Step, and Manual Dispatch.",
         "Traffic cycles traffic levels · Auto/Manual switches operator · Sim Queue runs the queue.",
         "Reports opens metrics · Settings opens options/help · Reset restarts the simulation.",
-        "The selected call and NEXT CALL TYPE are separate; creating a call keeps the type selected."
+        "NEXT CALL TYPE remains selected after creation; generation and dispatch modes are separate."
     };
     const int helpCount = SETTINGS_HELP_LINE_COUNT;
     const int visibleHelpLines = SETTINGS_HELP_VISIBLE_LINES;
@@ -3680,6 +3766,7 @@ int main(void)
     bool comparisonReady = false;
     bool showRoutes = true;
     bool showCivilianTraffic = true;
+    bool createCallOnMap = MAP_CALL_CREATION_DEFAULT != 0;
     bool responseView = false;
     bool responseFirstPerson = false;
     bool responseCameraDragging = false;
@@ -3704,6 +3791,9 @@ int main(void)
     char operatorNotice[CALL_REASON_LENGTH] = "";
     int operatorNoticeMatched = 0;
     double operatorNoticeUntil = 0.0;
+    char manualCallNotice[32] = "";
+    double manualCallNoticeUntil = 0.0;
+    int observedCallCount = simulation.callCount;
 
 
 
@@ -3802,6 +3892,7 @@ int main(void)
 
         if (IsKeyPressed(KEY_R)) {
             SimulationInit(&simulation);
+            createCallOnMap = MAP_CALL_CREATION_DEFAULT != 0;
             paused = false;
             fastForward = false;
             slowMotion = false;
@@ -3819,6 +3910,9 @@ int main(void)
             operatorNotice[0] = '\0';
             operatorNoticeMatched = 0;
             operatorNoticeUntil = 0.0;
+            manualCallNotice[0] = '\0';
+            manualCallNoticeUntil = 0.0;
+            observedCallCount = simulation.callCount;
         }
         }
 
@@ -3957,19 +4051,22 @@ int main(void)
                      CheckCollisionPointRec(mouse, modalCloseButton))) {
                     overlay = OVERLAY_NONE;
                 } else if (overlay == OVERLAY_SETTINGS &&
-                           CheckCollisionPointRec(mouse, routesToggleButton)) {
+                           CheckCollisionPointRec(mouse, SettingsRoutesToggleBounds())) {
                     showRoutes = !showRoutes;
                 } else if (overlay == OVERLAY_SETTINGS &&
-                           CheckCollisionPointRec(mouse, civilianToggleButton)) {
+                           CheckCollisionPointRec(mouse, SettingsCivilianToggleBounds())) {
                     showCivilianTraffic = !showCivilianTraffic;
                 } else if (overlay == OVERLAY_SETTINGS &&
-                           CheckCollisionPointRec(mouse, cityConditionButton)) {
+                           CheckCollisionPointRec(mouse, SettingsCityConditionBounds())) {
                     SimulationSetCityCondition(&simulation,
                         (CityCondition)((simulation.cityCondition + 1) % CITY_CONDITION_COUNT));
                 } else if (overlay == OVERLAY_SETTINGS &&
-                           CheckCollisionPointRec(mouse, autoIncidentsButton)) {
+                           CheckCollisionPointRec(mouse, SettingsAutoIncidentsBounds())) {
                     SimulationSetAutoIncidents(&simulation,
                         !simulation.autoIncidentsEnabled, AUTO_INCIDENT_DEFAULT_SEED);
+                } else if (overlay == OVERLAY_SETTINGS &&
+                           CheckCollisionPointRec(mouse, SettingsMapCallToggleBounds())) {
+                    createCallOnMap = !createCallOnMap;
                 }
             } else if (CheckCollisionPointRec(mouse, compareButton)) {
 
@@ -3985,6 +4082,8 @@ int main(void)
                                           DISPATCH_MANUAL : DISPATCH_AUTOMATIC;
                 selectedVehicleMask = 0;
                 if (simulation.dispatchMode == DISPATCH_AUTOMATIC) {
+                    manualCallNotice[0] = '\0';
+                    manualCallNoticeUntil = 0.0;
                     for (int i = 0; i < simulation.callCount; i++)
                         if (!simulation.calls[i].classified && !simulation.calls[i].dispatched)
                             simulation.calls[i].overridePending = 1;
@@ -3993,6 +4092,12 @@ int main(void)
                 } else {
                     for (int i = 0; i < simulation.callCount; i++)
                         simulation.calls[i].overridePending = 0;
+                    for (int i = 0; i < simulation.callCount; i++) {
+                        if (simulation.calls[i].dispatched || CallIsTerminal(&simulation, i)) continue;
+                        snprintf(manualCallNotice, sizeof(manualCallNotice), "CALLS WAITING");
+                        manualCallNoticeUntil = GetTime() + 5.0;
+                        break;
+                    }
                 }
 
             } else if (simulation.dispatchMode == DISPATCH_MANUAL &&
@@ -4064,6 +4169,7 @@ int main(void)
             } else if (CheckCollisionPointRec(mouse, resetButton)) {
 
                 SimulationInit(&simulation);
+                createCallOnMap = MAP_CALL_CREATION_DEFAULT != 0;
 
                 paused = false;
 
@@ -4084,6 +4190,9 @@ int main(void)
                 operatorNotice[0] = '\0';
                 operatorNoticeMatched = 0;
                 operatorNoticeUntil = 0.0;
+                manualCallNotice[0] = '\0';
+                manualCallNoticeUntil = 0.0;
+                observedCallCount = simulation.callCount;
 
             } else if (CheckCollisionPointRec(mouse, queuePanel) &&
                        mouse.y >= queueRowsY && queueCount > 0) {
@@ -4154,7 +4263,9 @@ int main(void)
                     selectedCall = -1;
                     selectedIncident = -1;
                     selectedVehicleMask = 0;
-                    if (SimulationCreateCall(&simulation, cityPoint,
+                    if (MapClickShouldCreateCall(createCallOnMap, clickedIncident,
+                                                 FindCallAtPosition(&simulation, cityPoint)) &&
+                        SimulationCreateCall(&simulation, cityPoint,
                             CallerReportForType((IncidentType)selectedType, simulation.callCount))) {
                         selectedCall = simulation.callCount - 1;
                         IncidentType reportType = (IncidentType)selectedType;
@@ -4221,6 +4332,16 @@ int main(void)
         // AUTO OP override modal immediately after that update, before drawing.
         StartPendingOverrideModal(&simulation, &paused, &overrideResumeWhenDone,
                                   &overrideModalCall, &overrideModalDeadline);
+        if (simulation.callCount < observedCallCount)
+            observedCallCount = 0;
+        if (ManualIncomingNoticeNeeded(simulation.dispatchMode == DISPATCH_MANUAL,
+                                       observedCallCount, simulation.callCount)) {
+            int newestCall = simulation.callCount - 1;
+            snprintf(manualCallNotice, sizeof(manualCallNotice), "NEW CALL #%02d",
+                     newestCall + 1);
+            manualCallNoticeUntil = GetTime() + 5.0;
+        }
+        observedCallCount = simulation.callCount;
         UpdateCallerFeedbackToast(&simulation, operatorNotice, sizeof(operatorNotice),
                                   &operatorNoticeMatched, &operatorNoticeUntil);
 
@@ -4285,7 +4406,10 @@ int main(void)
                      simulation.autoIncidentCapacitySuspended ? ORANGE : SKYBLUE);
         }
 
-        DrawIncidentQueue(&simulation, queueOrder, queueCount, selectedCall);
+        DrawIncidentQueue(&simulation, queueOrder, queueCount, selectedCall,
+                          createCallOnMap,
+                          simulation.dispatchMode == DISPATCH_MANUAL &&
+                          GetTime() < manualCallNoticeUntil ? manualCallNotice : "");
         DrawPanel(mapPanel);
         const Vehicle *trackedResponse = responseView && responseVehicleIndex >= 0 &&
             responseVehicleIndex < simulation.vehicleCount ?
@@ -4295,7 +4419,8 @@ int main(void)
                  408, 98, 16, RAYWHITE);
         DrawText(responseView ? (responseFirstPerson ? "First-person vehicle view" :
                  "Drag in the scene to look around; scroll to zoom") :
-                 "Click map to log or inspect a call  |  1-4 report type", 408, 116, 8,
+                 createCallOnMap ? "MAP CLICKS CREATE CALLS  |  1-4 TYPE" :
+                                   "MAP CLICKS INSPECT ONLY", 408, 116, 8,
                  (Color){139, 164, 179, 255});
         if (!responseView) DrawMapLegend();
         if (responseView) {
@@ -4371,8 +4496,13 @@ int main(void)
 
         if (overlay == OVERLAY_REPORTS) DrawReportsOverlay(&simulation);
         else if (overlay == OVERLAY_SETTINGS)
-            DrawSettingsOverlay(showRoutes, showCivilianTraffic, &simulation,
+            DrawSettingsOverlay(showRoutes, showCivilianTraffic, createCallOnMap,
+                                &simulation,
                                 settingsHelpScroll);
+
+        if (simulation.dispatchMode == DISPATCH_MANUAL &&
+            GetTime() < manualCallNoticeUntil)
+            DrawManualCallToast(manualCallNotice);
 
         if (overrideModalCall >= 0)
             DrawOperatorOverrideModal(&simulation, overrideModalCall, overrideModalDeadline);

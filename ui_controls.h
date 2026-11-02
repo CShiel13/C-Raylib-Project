@@ -5,6 +5,7 @@
 
 #define SETTINGS_HELP_LINE_COUNT 16
 #define SETTINGS_HELP_VISIBLE_LINES 7
+#define MAP_CALL_CREATION_DEFAULT 0
 
 static int IncidentNumberKeyAt(int index)
 {
@@ -35,6 +36,31 @@ static Rectangle SettingsHelpViewportBounds(void)
     return (Rectangle){462, 554, 676, 136};
 }
 
+static Rectangle SettingsRoutesToggleBounds(void)
+{
+    return (Rectangle){470, 245, 680, 48};
+}
+
+static Rectangle SettingsCivilianToggleBounds(void)
+{
+    return (Rectangle){470, 301, 680, 48};
+}
+
+static Rectangle SettingsCityConditionBounds(void)
+{
+    return (Rectangle){470, 357, 680, 48};
+}
+
+static Rectangle SettingsAutoIncidentsBounds(void)
+{
+    return (Rectangle){470, 413, 680, 48};
+}
+
+static Rectangle SettingsMapCallToggleBounds(void)
+{
+    return (Rectangle){470, 469, 680, 48};
+}
+
 static Rectangle ResponseViewButtonBounds(void)
 {
     return (Rectangle){1012, 94, 178, 32};
@@ -53,6 +79,17 @@ static int SettingsHelpScrollByWheel(int current, float wheelDelta)
     if (current < 0) return 0;
     if (current > maximum) return maximum;
     return current;
+}
+
+static int MapClickShouldCreateCall(int createCallOnMap, int incidentHit, int callHit)
+{
+    return createCallOnMap && incidentHit < 0 && callHit < 0;
+}
+
+static int ManualIncomingNoticeNeeded(int manualMode, int previousCallCount,
+                                      int currentCallCount)
+{
+    return manualMode && currentCallCount > previousCallCount;
 }
 
 #endif
