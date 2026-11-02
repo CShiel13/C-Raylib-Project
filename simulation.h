@@ -40,7 +40,13 @@ typedef struct {
     float elapsedTime;
     SimulationEvent events[MAX_SIMULATION_EVENTS];
     int eventCount;
+    int autoIncidentsEnabled;
+    int autoIncidentCapacitySuspended;
+    float autoIncidentNextAt;
+    unsigned int autoIncidentRandomState;
 } Simulation;
+
+#define AUTO_INCIDENT_DEFAULT_SEED 0x51A7E123u
 
 typedef struct {
     int resolved;
@@ -54,6 +60,8 @@ typedef struct {
 } StrategyComparison;
 
 void SimulationInit(Simulation *simulation);
+void SimulationSetAutoIncidents(Simulation *simulation, int enabled, unsigned int seed);
+float SimulationAutoIncidentSecondsUntilNext(const Simulation *simulation);
 int SimulationStartApartmentFireDrill(Simulation *simulation);
 int SimulationStartApartmentFireDrillAtSeverity(Simulation *simulation, int severity);
 int SimulationCreateIncident(Simulation *simulation, IncidentType type, Vector2 position);

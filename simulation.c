@@ -53,6 +53,114 @@ static void LogEvent(Simulation *simulation, const char *message)
     snprintf(event->message, sizeof(event->message), "%s", message);
 }
 
+static unsigned int AutoIncidentRandomNext(Simulation *simulation)
+{
+    // Xorshift32 keeps this feature reproducible without sharing rand() state.
+    unsigned int value = simulation->autoIncidentRandomState;
+    if (value == 0u) value = AUTO_INCIDENT_DEFAULT_SEED;
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    simulation->autoIncidentRandomState = value;
+    return value;
+}
+
+static float AutoIncidentRandomInterval(Simulation *simulation)
+{
+    return 5.0f + (float)(AutoIncidentRandomNext(simulation) % 26u);
+}
+
+void SimulationSetAutoIncidents(Simulation *simulation, int enabled, unsigned int seed)
+{
+    if (!simulation) return;
+    int turnOn = enabled != 0;
+    if (turnOn == simulation->autoIncidentsEnabled) return;
+    simulation->autoIncidentsEnabled = turnOn;
+    simulation->autoIncidentCapacitySuspended = 0;
+    if (turnOn) {
+        simulation->autoIncidentRandomState = seed ? seed : AUTO_INCIDENT_DEFAULT_SEED;
+        simulation->autoIncidentNextAt = simulation->elapsedTime +
+                                         AutoIncidentRandomInterval(simulation);
+        LogEvent(simulation, "Automatic incident generation enabled.");
+    } else {
+        simulation->autoIncidentNextAt = 0.0f;
+        LogEvent(simulation, "Automatic incident generation disabled.");
+    }
+}
+
+float SimulationAutoIncidentSecondsUntilNext(const Simulation *simulation)
+{
+    if (!simulation || !simulation->autoIncidentsEnabled ||
+        simulation->autoIncidentCapacitySuspended) return -1.0f;
+    float remaining = simulation->autoIncidentNextAt - simulation->elapsedTime;
+    return remaining > 0.0f ? remaining : 0.0f;
+}
+
+static void GenerateAutoIncidentIfDue(Simulation *simulation)
+{
+    if (!simulation || !simulation->autoIncidentsEnabled ||
+        simulation->autoIncidentCapacitySuspended ||
+        simulation->elapsedTime < simulation->autoIncidentNextAt) return;
+
+    // Calls become incidents only after classification, so protect both fixed
+    // arrays before creating a new queued report.
+    if (simulation->callCount >= MAX_CALLS ||
+        simulation->incidentCount >= MAX_INCIDENTS) {
+        simulation->autoIncidentCapacitySuspended = 1;
+        LogEvent(simulation, "Automatic incident generation paused: call or incident capacity is full.");
+        return;
+    }
+
+    static const IncidentType types[] = {
+        INCIDENT_FIRE, INCIDENT_CRIME, INCIDENT_ACCIDENT, INCIDENT_MEDICAL
+    };
+    static const char *reports[4][3] = {
+        {"Caller reports a small fire in a waste bin near the street.",
+         "Caller reports smoke from a building; people may be inside.",
+         "Caller reports flames spreading and people trapped inside."},
+        {"Caller reports a suspicious person near a closed shop.",
+         "Caller reports a break-in in progress at a shop.",
+         "Caller reports an assault with a weapon in progress."},
+        {"Caller reports a minor vehicle collision; traffic is moving.",
+         "Caller reports two vehicles collided and one lane is blocked.",
+         "Caller reports a multiple-vehicle collision with serious injuries."},
+        {"Caller reports a person feeling unwell and asking for medical help.",
+         "Caller reports an injured person who needs urgent medical help.",
+         "Caller reports a person unresponsive and not breathing."}
+    };
+
+    int typeIndex = (int)(AutoIncidentRandomNext(simulation) % 4u);
+    int severity = 1 + (int)(AutoIncidentRandomNext(simulation) % 3u);
+    int buildingIndex = (int)(AutoIncidentRandomNext(simulation) % CITY_LAYOUT_BUILDING_COUNT);
+    Rectangle building = CITY_LAYOUT_BUILDINGS[buildingIndex];
+    Vector2 location = {building.x + building.width * 0.5f,
+                        building.y + building.height * 0.5f};
+    if (!SimulationCreateCall(simulation, location,
+                              reports[typeIndex][severity - 1])) {
+        simulation->autoIncidentCapacitySuspended = 1;
+        LogEvent(simulation, "Automatic incident generation paused: call queue is full.");
+        return;
+    }
+
+    int callIndex = simulation->callCount - 1;
+    SimulationSetCallTruth(simulation, callIndex, types[typeIndex], severity);
+    EmergencyCall *call = &simulation->calls[callIndex];
+    if (simulation->dispatchMode == DISPATCH_AUTOMATIC)
+        call->overridePending = 1;
+    char event[SIMULATION_EVENT_LENGTH];
+    snprintf(event, sizeof(event), "Automatic %s call generated at building %d.",
+             types[typeIndex] == INCIDENT_FIRE ? "fire" :
+             types[typeIndex] == INCIDENT_CRIME ? "police" :
+             types[typeIndex] == INCIDENT_ACCIDENT ? "traffic accident" : "medical",
+             buildingIndex + 1);
+    LogEvent(simulation, event);
+
+    // Schedule from current simulation time. A large update produces at most
+    // one call and never attempts to catch up with a burst.
+    simulation->autoIncidentNextAt = simulation->elapsedTime +
+                                     AutoIncidentRandomInterval(simulation);
+}
+
 void SimulationSetCityCondition(Simulation *simulation, CityCondition condition)
 {
     if (!simulation) return;
@@ -2119,6 +2227,8 @@ void SimulationUpdate(Simulation *simulation, float deltaTime)
     if (!simulation || !isfinite(deltaTime) || deltaTime <= 0.0f) return;
 
     simulation->elapsedTime += deltaTime;
+
+    GenerateAutoIncidentIfDue(simulation);
 
     UpdateCivilianTraffic(simulation, deltaTime);
     UpdatePedestrians(simulation, deltaTime);
