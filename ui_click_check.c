@@ -89,6 +89,23 @@ static void CheckWindow(int width, int height)
     assert(CheckCollisionPointRec(virtualPoint, helpViewport));
     assert(helpViewport.x >= 390 && helpViewport.x + helpViewport.width <= 1210);
     assert(helpViewport.y >= 110 && helpViewport.y + helpViewport.height <= 790);
+    Rectangle previousTab = {0};
+    for (int tab = 0; tab < SETTINGS_HELP_TOPIC_COUNT; tab++) {
+        Rectangle bounds = SettingsHelpTabBounds(tab);
+        assert(CheckCollisionPointRec((Vector2){bounds.x + bounds.width * 0.5f,
+                                                bounds.y + bounds.height * 0.5f},
+                                      helpViewport));
+        assert(bounds.x >= helpViewport.x &&
+               bounds.x + bounds.width <= helpViewport.x + helpViewport.width);
+        Vector2 tabCenter = {bounds.x + bounds.width * 0.5f,
+                             bounds.y + bounds.height * 0.5f};
+        Vector2 tabScreen = {viewport.x + tabCenter.x * viewport.width / 1600.0f,
+                             viewport.y + tabCenter.y * viewport.height / 900.0f};
+        assert(ScreenToVirtualPoint(tabScreen, viewport, 1600, 900, &virtualPoint));
+        assert(CheckCollisionPointRec(virtualPoint, bounds));
+        if (tab > 0) assert(!CheckCollisionRecs(previousTab, bounds));
+        previousTab = bounds;
+    }
 
     // Camera drag and wheel input use the same converted virtual coordinates
     // and ignore the unit selector/HUD controls drawn over the 3D viewport.
@@ -205,6 +222,22 @@ static void CheckMapCreationToggle(void)
     assert(simulation.callCount == before + 1);
 }
 
+static void CheckIncidentQueueScrolling(void)
+{
+    int order[12];
+    for (int i = 0; i < 12; i++) order[i] = 40 + i;
+    assert(IncidentQueueClampOffset(0, 12) == 0);
+    assert(IncidentQueueScrollOffset(0, -1.0f, 12) == 1);
+    assert(IncidentQueueCallAtRow(order, 12, 1, 0) == 41);
+    int lastOffset = IncidentQueueScrollOffset(4, -1.0f, 12);
+    assert(lastOffset == 4);
+    assert(IncidentQueueCallAtRow(order, 12, lastOffset, 7) == 51);
+    assert(IncidentQueueScrollOffset(lastOffset, -1.0f, 12) == 4);
+    assert(IncidentQueueScrollOffset(lastOffset, 1.0f, 12) == 3);
+    assert(IncidentQueueClampOffset(8, 3) == 0);
+    assert(IncidentQueueCallAtRow(order, 3, 0, 3) == -1);
+}
+
 int main(void)
 {
     // Keep the same shared manual hit-test helpers linked into this geometry
@@ -220,16 +253,17 @@ int main(void)
     assert(IncidentTypeForNumberKey(KEY_FOUR) == INCIDENT_MEDICAL);
     assert(CycleNextCallType(INCIDENT_MEDICAL) == INCIDENT_FIRE);
     assert(CycleNextCallType(INCIDENT_FIRE) == INCIDENT_CRIME);
-    assert(SETTINGS_HELP_LINE_COUNT > SETTINGS_HELP_VISIBLE_LINES);
-    assert(SettingsHelpScrollByWheel(0, 1.0f) == 0);
-    assert(SettingsHelpScrollByWheel(0, -1.0f) == 1);
-    assert(SettingsHelpScrollByWheel(SETTINGS_HELP_LINE_COUNT, -1.0f) ==
-           SETTINGS_HELP_LINE_COUNT - SETTINGS_HELP_VISIBLE_LINES);
+    assert(SETTINGS_HELP_TOPIC_COUNT == 5);
+    assert(SETTINGS_HELP_LINES_PER_TOPIC == 5);
+    assert(SettingsHelpTopicByWheel(0, -1.0f) == 1);
+    assert(SettingsHelpTopicByWheel(4, -1.0f) == 0);
+    assert(SettingsHelpTopicByWheel(0, 1.0f) == 4);
     CheckWindow(1120, 700);
     CheckWindow(1440, 810);
     CheckWindow(1920, 1080);
     CheckManualUnitRows();
     CheckMapCreationToggle();
+    CheckIncidentQueueScrolling();
     puts("resized-window click mapping and manual multi-unit selection checks passed");
     return 0;
 }

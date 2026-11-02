@@ -3,9 +3,10 @@
 
 #include "incidents.h"
 
-#define SETTINGS_HELP_LINE_COUNT 16
-#define SETTINGS_HELP_VISIBLE_LINES 7
+#define SETTINGS_HELP_TOPIC_COUNT 5
+#define SETTINGS_HELP_LINES_PER_TOPIC 5
 #define MAP_CALL_CREATION_DEFAULT 0
+#define INCIDENT_QUEUE_VISIBLE_ROWS 8
 
 static int IncidentNumberKeyAt(int index)
 {
@@ -33,7 +34,12 @@ static Rectangle NextCallTypeSelectorBounds(void)
 
 static Rectangle SettingsHelpViewportBounds(void)
 {
-    return (Rectangle){462, 554, 676, 136};
+    return (Rectangle){458, 552, 684, 140};
+}
+
+static Rectangle SettingsHelpTabBounds(int tab)
+{
+    return (Rectangle){460.0f + (float)tab * 137.0f, 556.0f, 132.0f, 26.0f};
 }
 
 static Rectangle SettingsRoutesToggleBounds(void)
@@ -71,13 +77,12 @@ static Rectangle MapLegendBounds(void)
     return (Rectangle){700, 99, 260, 24};
 }
 
-static int SettingsHelpScrollByWheel(int current, float wheelDelta)
+static int SettingsHelpTopicByWheel(int current, float wheelDelta)
 {
-    int maximum = SETTINGS_HELP_LINE_COUNT - SETTINGS_HELP_VISIBLE_LINES;
     if (wheelDelta < 0.0f) current++;
     else if (wheelDelta > 0.0f) current--;
-    if (current < 0) return 0;
-    if (current > maximum) return maximum;
+    if (current < 0) return SETTINGS_HELP_TOPIC_COUNT - 1;
+    if (current >= SETTINGS_HELP_TOPIC_COUNT) return 0;
     return current;
 }
 
@@ -90,6 +95,31 @@ static int ManualIncomingNoticeNeeded(int manualMode, int previousCallCount,
                                       int currentCallCount)
 {
     return manualMode && currentCallCount > previousCallCount;
+}
+
+static int IncidentQueueClampOffset(int offset, int orderCount)
+{
+    int maximum = orderCount - INCIDENT_QUEUE_VISIBLE_ROWS;
+    if (maximum < 0) maximum = 0;
+    if (offset < 0) return 0;
+    return offset > maximum ? maximum : offset;
+}
+
+static int IncidentQueueScrollOffset(int offset, float wheelDelta, int orderCount)
+{
+    if (wheelDelta > 0.0f) offset--;
+    else if (wheelDelta < 0.0f) offset++;
+    return IncidentQueueClampOffset(offset, orderCount);
+}
+
+// Keep drawing and row hit testing on the same ordered call index.
+static int IncidentQueueCallAtRow(const int *order, int orderCount,
+                                  int offset, int row)
+{
+    if (!order || row < 0 || row >= INCIDENT_QUEUE_VISIBLE_ROWS) return -1;
+    offset = IncidentQueueClampOffset(offset, orderCount);
+    int index = offset + row;
+    return index < orderCount ? order[index] : -1;
 }
 
 #endif

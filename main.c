@@ -26,7 +26,7 @@
 #define UI_RENDER_SCALE 2
 #define CITY_WIDTH CITY_LAYOUT_WIDTH
 #define CITY_HEIGHT CITY_LAYOUT_HEIGHT
-#define QUEUE_VISIBLE 8
+#define QUEUE_VISIBLE INCIDENT_QUEUE_VISIBLE_ROWS
 
 typedef enum {
     OVERLAY_NONE = 0,
@@ -1495,7 +1495,8 @@ static void DrawNextCallTypeSelector(IncidentType selectedType)
 }
 
 static void DrawIncidentQueue(const Simulation *simulation, const int order[MAX_CALLS],
-                              int orderCount, int selectedCall, int createCallOnMap,
+                              int orderCount, int scrollOffset, int selectedCall,
+                              int createCallOnMap,
                               const char *manualCallNotice)
 {
     DrawPanel(queuePanel);
@@ -1505,6 +1506,14 @@ static void DrawIncidentQueue(const Simulation *simulation, const int order[MAX_
     DrawText("INCIDENT QUEUE", 26, 103, 17, RAYWHITE);
     DrawText(TextFormat("%d waiting  |  %d total", waiting, simulation->callCount), 26, 126, 10,
              (Color){134, 160, 177, 255});
+    scrollOffset = IncidentQueueClampOffset(scrollOffset, orderCount);
+    if (orderCount > QUEUE_VISIBLE) {
+        DrawText("WHEEL", 195, 126, 7, (Color){134, 160, 177, 255});
+        DrawText(TextFormat("%d-%d / %d", scrollOffset + 1,
+                            scrollOffset + QUEUE_VISIBLE < orderCount ?
+                                scrollOffset + QUEUE_VISIBLE : orderCount,
+                            orderCount), 245, 126, 8, (Color){134, 160, 177, 255});
+    }
     DrawText(simulation->dispatchMode == DISPATCH_AUTOMATIC ? "AUTO" : "MANUAL",
              318, 126, 9, simulation->dispatchMode == DISPATCH_AUTOMATIC ? GREEN : SKYBLUE);
     if (manualCallNotice && manualCallNotice[0]) {
@@ -1516,7 +1525,9 @@ static void DrawIncidentQueue(const Simulation *simulation, const int order[MAX_
                  (Color){255, 226, 161, 255});
     }
 
-    int visible = orderCount < QUEUE_VISIBLE ? orderCount : QUEUE_VISIBLE;
+    int visible = orderCount - scrollOffset;
+    if (visible < 0) visible = 0;
+    if (visible > QUEUE_VISIBLE) visible = QUEUE_VISIBLE;
     if (visible == 0) {
         DrawText("No calls received yet", 34, 166, 13, (Color){160, 181, 195, 255});
         DrawText(createCallOnMap ? "Click the map to create a call." :
@@ -1524,7 +1535,8 @@ static void DrawIncidentQueue(const Simulation *simulation, const int order[MAX_
                  34, 188, 10, (Color){116, 142, 159, 255});
     } else {
         for (int row = 0; row < visible; row++) {
-            int callIndex = order[row];
+            int callIndex = IncidentQueueCallAtRow(order, orderCount, scrollOffset, row);
+            if (callIndex < 0 || callIndex >= simulation->callCount) continue;
             const EmergencyCall *call = &simulation->calls[callIndex];
             int incidentIndex = CallIncidentIndex(simulation, callIndex);
             const Incident *incident = incidentIndex >= 0 &&
@@ -3656,7 +3668,7 @@ static void DrawReportsOverlay(const Simulation *simulation)
 
 static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
                                 int createCallOnMap, const Simulation *simulation,
-                                int helpScroll)
+                                int helpTopic)
 {
     DrawRectangle(0, 0, UI_WIDTH, UI_HEIGHT, (Color){0, 0, 0, 155});
     DrawPanel(settingsPanel);
@@ -3686,41 +3698,71 @@ static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
                "CREATE CALL ON MAP: ON  |  EMPTY MAP CLICK CREATES A CALL" :
                "CREATE CALL ON MAP: OFF  |  MAP CLICKS INSPECT ONLY",
                createCallOnMap ? (Color){24, 112, 87, 255} : (Color){31, 92, 132, 255});
-    DrawText("CONTROLS & HELP  ·  SCROLL INSIDE THIS PANEL FOR MORE",
-             472, 529, 12, (Color){107, 190, 238, 255});
+    DrawText("CONTROLS & HELP", 472, 529, 14, (Color){107, 190, 238, 255});
+    DrawText("Choose a topic below. Scroll here to switch topics.",
+             625, 532, 10, (Color){177, 199, 211, 255});
     Rectangle helpPanel = {452, 550, 696, 146};
     DrawRectangleRounded(helpPanel, 0.035f, 8, (Color){8, 24, 37, 255});
     DrawRectangleRoundedLinesEx(helpPanel, 0.035f, 8, 1,
                                 (Color){39, 73, 96, 255});
-    static const char *helpLines[SETTINGS_HELP_LINE_COUNT] = {
-        "KEYS  1 Fire · 2 Police · 3 Traffic accident · 4 Medical; selector click cycles types.",
-        "A starts the apartment-fire drill; Shift+A starts its minor version.",
-        "Space pause/resume · S slow · F fast · N step 0.1s · T traffic · W weather.",
-        "M simulate queue · C compare strategies · R reset · Esc close overlays.",
-        "MAP  Empty clicks create a call only when CREATE CALL ON MAP is ON.",
-        "Click a call/incident marker to inspect it; click a queue card to select or clear it.",
-        "MANUAL  Classify the call and priority, select suitable units, then dispatch.",
-        "AUTO  The operator classifies and dispatches; timed human override is Auto-only.",
-        "Manual unit list: click an available row or checkbox to toggle that unit.",
-        "STREET VIEW  Click a response-unit row or use PREV/NEXT to switch units.",
-        "Drag in the 3D scene to orbit; scroll there to zoom; RESET 3P resets the chase view.",
-        "FIRST PERSON toggles camera mode; BACK TO MAP returns to the 2D map.",
-        "BOTTOM BAR  Compare, Pause/Resume, Slow, 1x, Fast, Step, and Manual Dispatch.",
-        "Traffic cycles traffic levels · Auto/Manual switches operator · Sim Queue runs the queue.",
-        "Reports opens metrics · Settings opens options/help · Reset restarts the simulation.",
-        "NEXT CALL TYPE remains selected after creation; generation and dispatch modes are separate."
+    static const char *topicNames[SETTINGS_HELP_TOPIC_COUNT] = {
+        "KEYS", "MAP & CALLS", "DISPATCH", "STREET VIEW", "BOTTOM BAR"
     };
-    const int helpCount = SETTINGS_HELP_LINE_COUNT;
-    const int visibleHelpLines = SETTINGS_HELP_VISIBLE_LINES;
-    if (helpScroll < 0) helpScroll = 0;
-    if (helpScroll > helpCount - visibleHelpLines) helpScroll = helpCount - visibleHelpLines;
-    DrawText(TextFormat("HELP %d-%d OF %d", helpScroll + 1,
-             helpScroll + visibleHelpLines, helpCount), 1010, 532, 8,
-             (Color){154, 181, 198, 255});
-    for (int row = 0; row < visibleHelpLines; row++) {
-        int line = helpScroll + row;
-        DrawText(helpLines[line], 470, 559 + row * 18, 9,
-                 line < 4 ? (Color){186, 211, 224, 255} : RAYWHITE);
+    static const char *helpLines[SETTINGS_HELP_TOPIC_COUNT][SETTINGS_HELP_LINES_PER_TOPIC] = {
+        {
+            "1 Fire   2 Police   3 Traffic accident   4 Medical.",
+            "Click NEXT CALL TYPE to cycle through those four types.",
+            "A starts the apartment-fire drill; Shift+A starts a small fire.",
+            "Space pause   S slow   F fast   N step by 0.1 seconds.",
+            "T traffic   W weather   M simulate queue   C compare   R reset   Esc close."
+        },
+        {
+            "Auto Incidents creates calls every 5-30 simulated seconds.",
+            "CREATE CALL ON MAP ON: click empty map space to create a call.",
+            "When it is OFF, map clicks inspect or select calls and incidents.",
+            "Click a queue card or map marker to select a call.",
+            "Timed calls and map-created calls are controlled separately."
+        },
+        {
+            "AUTO: the operator classifies calls and dispatches suitable units.",
+            "AUTO only: the 12-second incoming-call popup lets you override service.",
+            "MANUAL: choose a call, incident type and priority, then classify it.",
+            "Select available vehicles that match every required service and quantity.",
+            "Dispatch sends the selected units once all requirements are met."
+        },
+        {
+            "Select a call with a responding unit, then choose VIEW RESPONSE.",
+            "Choose a responder from the list or use PREV / NEXT.",
+            "Drag in the 3D scene to orbit; scroll there to zoom.",
+            "RESET 3P restores the chase camera; FIRST PERSON switches view.",
+            "BACK TO MAP returns to the city. Pause and speed still apply."
+        },
+        {
+            "COMPARE runs the same scenario with two dispatch strategies.",
+            "PAUSE, SLOW, 1x, FAST and STEP control simulation time.",
+            "DISPATCH sends selected manual units; TRAFFIC changes traffic level.",
+            "AUTO OP / MANUAL OP changes dispatcher; SIM QUEUE runs the queue.",
+            "REPORTS shows results; SETTINGS opens options; RESET restarts."
+        }
+    };
+    if (helpTopic < 0 || helpTopic >= SETTINGS_HELP_TOPIC_COUNT) helpTopic = 0;
+    for (int tab = 0; tab < SETTINGS_HELP_TOPIC_COUNT; tab++) {
+        Rectangle bounds = SettingsHelpTabBounds(tab);
+        int selected = tab == helpTopic;
+        DrawRectangleRounded(bounds, 0.14f, 6,
+            selected ? (Color){24, 96, 137, 255} : (Color){17, 43, 61, 255});
+        DrawRectangleRoundedLinesEx(bounds, 0.14f, 6, 1.0f,
+            selected ? (Color){91, 190, 235, 255} : (Color){44, 82, 103, 255});
+        int width = MeasureUiText(topicNames[tab], 10);
+        DrawText(topicNames[tab], (int)(bounds.x + (bounds.width - width) * 0.5f),
+                 (int)bounds.y + 7, 10,
+                 selected ? RAYWHITE : (Color){180, 202, 215, 255});
+    }
+    for (int row = 0; row < SETTINGS_HELP_LINES_PER_TOPIC; row++) {
+        int y = 590 + row * 19;
+        DrawCircle(475, y + 8, 3, (Color){78, 184, 226, 255});
+        DrawText(helpLines[helpTopic][row], 487, y, 12,
+                 (Color){226, 236, 242, 255});
     }
     DrawButton(settingsCloseButton, "CLOSE", BLUE);
 }
@@ -3779,7 +3821,7 @@ int main(void)
     UIOverlay overlay = OVERLAY_NONE;
     int selectedCall = -1;
     int selectedIncident = -1;
-    int settingsHelpScroll = 0;
+    int settingsHelpTopic = 0;
     Rectangle responseViewButton = ResponseViewButtonBounds();
     IncidentType manualCallType = INCIDENT_FIRE;
     int manualCallSeverity = 1;
@@ -3794,6 +3836,7 @@ int main(void)
     char manualCallNotice[32] = "";
     double manualCallNoticeUntil = 0.0;
     int observedCallCount = simulation.callCount;
+    int queueScrollOffset = 0;
 
 
 
@@ -3913,6 +3956,7 @@ int main(void)
             manualCallNotice[0] = '\0';
             manualCallNoticeUntil = 0.0;
             observedCallCount = simulation.callCount;
+            queueScrollOffset = 0;
         }
         }
 
@@ -3949,9 +3993,14 @@ int main(void)
         float cameraWheel = GetMouseWheelMove();
         if (cameraWheel != 0.0f && cameraPointerAllowed)
             ResponseCameraZoom(&responseCameraState, cameraWheel);
+        if (cameraWheel != 0.0f && overlay == OVERLAY_NONE &&
+            overrideModalCall < 0 && !modalWasActive && mouseInCanvas &&
+            CheckCollisionPointRec(mouse, queuePanel))
+            queueScrollOffset = IncidentQueueScrollOffset(queueScrollOffset,
+                                                          cameraWheel, queueCount);
         if (cameraWheel != 0.0f && overlay == OVERLAY_SETTINGS && mouseInCanvas &&
             CheckCollisionPointRec(mouse, SettingsHelpViewportBounds())) {
-            settingsHelpScroll = SettingsHelpScrollByWheel(settingsHelpScroll, cameraWheel);
+            settingsHelpTopic = SettingsHelpTopicByWheel(settingsHelpTopic, cameraWheel);
         }
 
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mouseInCanvas) {
@@ -4067,6 +4116,13 @@ int main(void)
                 } else if (overlay == OVERLAY_SETTINGS &&
                            CheckCollisionPointRec(mouse, SettingsMapCallToggleBounds())) {
                     createCallOnMap = !createCallOnMap;
+                } else if (overlay == OVERLAY_SETTINGS) {
+                    for (int tab = 0; tab < SETTINGS_HELP_TOPIC_COUNT; tab++) {
+                        if (CheckCollisionPointRec(mouse, SettingsHelpTabBounds(tab))) {
+                            settingsHelpTopic = tab;
+                            break;
+                        }
+                    }
                 }
             } else if (CheckCollisionPointRec(mouse, compareButton)) {
 
@@ -4193,14 +4249,18 @@ int main(void)
                 manualCallNotice[0] = '\0';
                 manualCallNoticeUntil = 0.0;
                 observedCallCount = simulation.callCount;
+                queueScrollOffset = 0;
 
             } else if (CheckCollisionPointRec(mouse, queuePanel) &&
                        mouse.y >= queueRowsY && queueCount > 0) {
                 int row = (int)((mouse.y - queueRowsY) / queueRowHeight);
-                int visible = queueCount < QUEUE_VISIBLE ? queueCount : QUEUE_VISIBLE;
+                queueScrollOffset = IncidentQueueClampOffset(queueScrollOffset, queueCount);
+                int visible = queueCount - queueScrollOffset;
+                if (visible > QUEUE_VISIBLE) visible = QUEUE_VISIBLE;
                 if (row >= 0 && row < visible &&
                     CheckCollisionPointRec(mouse, QueueCardBounds(row))) {
-                    int clickedCall = queueOrder[row];
+                    int clickedCall = IncidentQueueCallAtRow(queueOrder, queueCount,
+                                                             queueScrollOffset, row);
                     selectedCall = clickedCall == selectedCall ? -1 : clickedCall;
                     selectedIncident = selectedCall >= 0 ?
                         CallIncidentIndex(&simulation, selectedCall) : -1;
@@ -4334,6 +4394,7 @@ int main(void)
                                   &overrideModalCall, &overrideModalDeadline);
         if (simulation.callCount < observedCallCount)
             observedCallCount = 0;
+        if (simulation.callCount != observedCallCount) queueScrollOffset = 0;
         if (ManualIncomingNoticeNeeded(simulation.dispatchMode == DISPATCH_MANUAL,
                                        observedCallCount, simulation.callCount)) {
             int newestCall = simulation.callCount - 1;
@@ -4406,7 +4467,8 @@ int main(void)
                      simulation.autoIncidentCapacitySuspended ? ORANGE : SKYBLUE);
         }
 
-        DrawIncidentQueue(&simulation, queueOrder, queueCount, selectedCall,
+        queueScrollOffset = IncidentQueueClampOffset(queueScrollOffset, queueCount);
+        DrawIncidentQueue(&simulation, queueOrder, queueCount, queueScrollOffset, selectedCall,
                           createCallOnMap,
                           simulation.dispatchMode == DISPATCH_MANUAL &&
                           GetTime() < manualCallNoticeUntil ? manualCallNotice : "");
@@ -4498,7 +4560,7 @@ int main(void)
         else if (overlay == OVERLAY_SETTINGS)
             DrawSettingsOverlay(showRoutes, showCivilianTraffic, createCallOnMap,
                                 &simulation,
-                                settingsHelpScroll);
+                                settingsHelpTopic);
 
         if (simulation.dispatchMode == DISPATCH_MANUAL &&
             GetTime() < manualCallNoticeUntil)
