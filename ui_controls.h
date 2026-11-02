@@ -35,6 +35,16 @@ static Rectangle SettingsHelpViewportBounds(void)
     return (Rectangle){462, 554, 676, 136};
 }
 
+static Rectangle ResponseViewButtonBounds(void)
+{
+    return (Rectangle){1012, 94, 178, 32};
+}
+
+static Rectangle MapLegendBounds(void)
+{
+    return (Rectangle){700, 99, 260, 24};
+}
+
 static int SettingsHelpScrollByWheel(int current, float wheelDelta)
 {
     int maximum = SETTINGS_HELP_LINE_COUNT - SETTINGS_HELP_VISIBLE_LINES;

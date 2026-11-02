@@ -39,7 +39,6 @@ static const Rectangle queuePanel = {10, 88, 372, 750};
 static const Rectangle mapPanel = {392, 88, 806, 750};
 static const Rectangle detailsPanel = {1208, 88, 382, 750};
 static const Rectangle mapClip = {400, 130, 790, 462};
-static const Rectangle responseViewButton = {1012, 94, 178, 32};
 static const Rectangle responsePreviousButton = {730, 548, 58, 34};
 static const Rectangle responseNextButton = {792, 548, 58, 34};
 static const Rectangle responseCameraButton = {854, 548, 148, 34};
@@ -1209,8 +1208,9 @@ static void DrawPanel(Rectangle rect)
 
 static void DrawMapLegend(void)
 {
-    const int startX = 770;
-    const int y = 111;
+    Rectangle legendBounds = MapLegendBounds();
+    const int startX = (int)legendBounds.x + 4;
+    const int y = (int)(legendBounds.y + legendBounds.height * 0.5f);
     DrawIncidentIcon(INCIDENT_FIRE, (Vector2){startX + 4, y}, 4.5f, IncidentColor(INCIDENT_FIRE));
     DrawText("Fire", startX + 12, y - 5, 8, (Color){206, 218, 227, 255});
     DrawVehicleIcon(INCIDENT_CRIME, (Vector2){startX + 55, y});
@@ -3628,7 +3628,7 @@ static void DrawSettingsOverlay(bool showRoutes, bool showCivilianTraffic,
     const int visibleHelpLines = SETTINGS_HELP_VISIBLE_LINES;
     if (helpScroll < 0) helpScroll = 0;
     if (helpScroll > helpCount - visibleHelpLines) helpScroll = helpCount - visibleHelpLines;
-    DrawText(TextFormat("HELP %d–%d OF %d", helpScroll + 1,
+    DrawText(TextFormat("HELP %d-%d OF %d", helpScroll + 1,
              helpScroll + visibleHelpLines, helpCount), 1010, 532, 8,
              (Color){154, 181, 198, 255});
     for (int row = 0; row < visibleHelpLines; row++) {
@@ -3693,6 +3693,7 @@ int main(void)
     int selectedCall = -1;
     int selectedIncident = -1;
     int settingsHelpScroll = 0;
+    Rectangle responseViewButton = ResponseViewButtonBounds();
     IncidentType manualCallType = INCIDENT_FIRE;
     int manualCallSeverity = 1;
     unsigned int selectedVehicleMask = 0;
@@ -3856,10 +3857,7 @@ int main(void)
             ResponseCameraZoom(&responseCameraState, cameraWheel);
         if (cameraWheel != 0.0f && overlay == OVERLAY_SETTINGS && mouseInCanvas &&
             CheckCollisionPointRec(mouse, SettingsHelpViewportBounds())) {
-            settingsHelpScroll += cameraWheel < 0.0f ? 1 : -1;
-            if (settingsHelpScroll < 0) settingsHelpScroll = 0;
-            if (settingsHelpScroll > SETTINGS_HELP_LINE_COUNT - SETTINGS_HELP_VISIBLE_LINES)
-                settingsHelpScroll = SETTINGS_HELP_LINE_COUNT - SETTINGS_HELP_VISIBLE_LINES;
+            settingsHelpScroll = SettingsHelpScrollByWheel(settingsHelpScroll, cameraWheel);
         }
 
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mouseInCanvas) {

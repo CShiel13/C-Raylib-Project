@@ -18,7 +18,7 @@ static void CheckWindow(int width, int height)
         {646,851,112,36}, {766,851,160,36},
         {934,851,118,36}, {1060,851,118,36}, {1186,851,104,36},
         {1298,851,112,36}, {1480,851,98,36},
-        {1012,94,178,32}, {730,548,58,34}, {792,548,58,34},
+        ResponseViewButtonBounds(), {730,548,58,34}, {792,548,58,34},
         {854,548,148,34}, {1006,548,96,34}, {20,150,352,80},
         {20,236,352,80}, {20,322,352,80},
         {470,256,680,56}, {470,324,680,56}, {470,392,680,56},
@@ -67,6 +67,8 @@ static void CheckWindow(int width, int height)
 
     Rectangle nextType = NextCallTypeSelectorBounds();
     Rectangle helpViewport = SettingsHelpViewportBounds();
+    Rectangle legend = MapLegendBounds();
+    assert(!CheckCollisionRecs(ResponseViewButtonBounds(), legend));
     Rectangle nextTypeScreen = {viewport.x + nextType.x * viewport.width / 1600.0f,
                                 viewport.y + nextType.y * viewport.height / 900.0f,
                                 nextType.width * viewport.width / 1600.0f,
