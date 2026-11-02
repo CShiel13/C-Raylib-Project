@@ -7,11 +7,11 @@
 
 static Rectangle ManualClassifyButtonBounds(void)
 {
-    return (Rectangle) { 1260.0f, 328.0f, 306.0f, 27.0f };
+    return (Rectangle) { 1224.0f, 496.0f, 350.0f, 42.0f };
 }
 
 // The classify button occupies this area only before classification. Its
-// rectangle overlaps the first unit row, so never let it intercept unit clicks
+// rectangle overlaps the unit rows, so never let it intercept unit clicks
 // after the call has been classified.
 static int ManualClassifyButtonHit(const Simulation* simulation, int callIndex,
     Vector2 mouse)
@@ -26,12 +26,12 @@ static int ManualClassifyButtonHit(const Simulation* simulation, int callIndex,
 // details panel. Pointer input is converted to this coordinate space once.
 static Rectangle ManualVehicleRowBounds(int row)
 {
-    return (Rectangle) { 1258.0f, 326.0f + (float)row * 16.0f, 308.0f, 14.0f };
+    return (Rectangle) { 1224.0f, 406.0f + (float)row * 30.0f, 350.0f, 27.0f };
 }
 
 static Rectangle ManualVehicleCheckboxBounds(int row)
 {
-    return (Rectangle) { 1543.0f, 327.0f + (float)row * 16.0f, 12.0f, 12.0f };
+    return (Rectangle) { 1544.0f, 409.0f + (float)row * 30.0f, 21.0f, 21.0f };
 }
 
 // Produce the displayed ordering once so drawing and hit testing map a row to
